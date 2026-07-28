@@ -6,19 +6,22 @@ The repository still keeps the architecture intentionally small, but it now incl
 
 ## Project Responsibilities
 
-- `src/HexStrategy.Core`
+- `engine/HexStrategy.Core`
   Pure engine/domain space. This is where reusable game concepts belong once implemented, such as board primitives, entities, players, game state, turn structures, and rule execution mechanisms.
-- `src/HexStrategy.Application`
+- `engine/HexStrategy.Application`
   Application layer around the core. It coordinates use cases, command handling, validation flow, and application-facing outcomes.
-- `src/HexStrategy.Session`
+- `engine/HexStrategy.Session`
   Runtime hosting/session concerns outside logical game state, such as active sessions, slot assignment, and connection-related runtime context.
-- `src/HexStrategy.Host.Web`
-  ASP.NET Core composition root. It wires dependencies and is the future home of HTTP APIs and SignalR.
+- `hosts/HexStrategy.Host.Web`
+  ASP.NET Core composition root. It wires dependencies and exposes generic backend APIs without serving a specific game's frontend.
 - `games/HexStrategy.Game.KingOfTheHill`
   Example game module implementing the sample game's initial setup, move validation, and win condition without placing those rules in the reusable engine.
   Each game project should also carry its own `rules.md` document describing the playable rules of that specific game.
 - `tools/HexStrategy.Console.KingOfTheHill`
   Minimal console consumer used to play and inspect the `KingOfTheHill` game without graphics.
+- `tools/HexStrategy.Frontend.Web.KingOfTheHill`
+  TypeScript + Canvas web tool used to manually exercise the `KingOfTheHill` game visually through the host APIs.
+  It runs as its own lightweight web project and lives in `tools/` because it is a game-specific manual exerciser, not reusable engine code and not part of the host composition root.
 - `tests/*`
   Test projects grouped by the production area or game they validate.
 
@@ -97,7 +100,6 @@ The following areas are intentionally deferred to later tasks:
 - persistence and save/load
 - authentication
 - real-time multiplayer transport
-- rendering and graphical UI
 - broader gameplay systems beyond the sample slice
 
 ## Review Notes

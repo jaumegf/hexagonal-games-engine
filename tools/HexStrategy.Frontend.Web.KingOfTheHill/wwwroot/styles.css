@@ -1,0 +1,135 @@
+:root {
+  --bg: #f5efe1;
+  --bg-panel: rgba(255, 251, 243, 0.94);
+  --ink: #1f1c19;
+  --accent: #aa3a2a;
+  --accent-soft: #dbb781;
+  --line: #3f3326;
+  --shadow: rgba(45, 29, 13, 0.15);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+  color: var(--ink);
+  background:
+    radial-gradient(circle at top left, rgba(255, 222, 173, 0.7), transparent 30%),
+    linear-gradient(135deg, #f7f0e2, #e3d1af);
+}
+
+.shell {
+  display: grid;
+  grid-template-columns: 340px 1fr;
+  min-height: 100vh;
+}
+
+.sidebar {
+  padding: 24px;
+  background: var(--bg-panel);
+  backdrop-filter: blur(8px);
+  box-shadow: 6px 0 18px var(--shadow);
+  overflow-y: auto;
+}
+
+.subtitle {
+  margin-top: 0;
+  color: #5d5145;
+}
+
+.panel {
+  margin-top: 20px;
+  padding: 16px;
+  border: 1px solid rgba(63, 51, 38, 0.18);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.45);
+}
+
+.panel h2 {
+  margin-top: 0;
+  font-size: 1rem;
+}
+
+.meta-list {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.meta-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  font-size: 0.95rem;
+}
+
+.meta-row strong {
+  color: #5d5145;
+}
+
+button {
+  width: 100%;
+  margin-top: 8px;
+  padding: 12px 14px;
+  border: none;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #aa3a2a, #d86d43);
+  color: white;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 120ms ease, box-shadow 120ms ease;
+}
+
+button:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 20px rgba(170, 58, 42, 0.25);
+}
+
+.log-panel {
+  display: grid;
+  gap: 8px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.log-entry {
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.65);
+  border: 1px solid rgba(63, 51, 38, 0.12);
+  font-size: 0.92rem;
+}
+
+.board-area {
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+#game-canvas {
+  width: min(100%, 1100px);
+  height: auto;
+  border-radius: 24px;
+  background:
+    radial-gradient(circle at center, rgba(219, 183, 129, 0.4), transparent 40%),
+    linear-gradient(180deg, rgba(255, 249, 239, 0.9), rgba(234, 220, 191, 0.9));
+  box-shadow: 0 18px 36px var(--shadow);
+}
+
+ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+@media (max-width: 1080px) {
+  .shell {
+    grid-template-columns: 1fr;
+  }
+
+  .board-area {
+    padding-top: 0;
+  }
+}

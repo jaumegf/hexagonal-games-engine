@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HexStrategy | King of the Hill</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <h1>King of the Hill</h1>
+      <p class="subtitle">Canvas tool for manually testing the game flow.</p>
+
+      <section class="panel">
+        <h2>Match</h2>
+        <div id="match-meta" class="meta-list"></div>
+        <button id="new-match-button" type="button">New Match</button>
+        <button id="pass-button" type="button">Pass Turn</button>
+      </section>
+
+      <section class="panel">
+        <h2>Selection</h2>
+        <div id="selection-panel" class="meta-list"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Help</h2>
+        <ul>
+          <li>Click one of the active player's units to select it.</li>
+          <li>Click an adjacent hex to attempt a move.</li>
+          <li>Use Pass Turn to keep control of the hill.</li>
+        </ul>
+      </section>
+
+      <section class="panel">
+        <h2>Log</h2>
+        <div id="log-panel" class="log-panel"></div>
+      </section>
+    </aside>
+
+    <main class="board-area">
+      <canvas id="game-canvas" width="1000" height="800"></canvas>
+    </main>
+  </div>
+
+  <script src="./config.js"></script>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

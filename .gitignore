@@ -11,3 +11,4 @@ NuGet/
 .vs/HexStrategy/v17/.suo
 .vs/HexStrategy/v17/.futdcache.v2
 .vs
+*.slnLaunch.user

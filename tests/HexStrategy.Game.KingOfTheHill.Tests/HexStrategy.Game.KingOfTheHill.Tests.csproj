@@ -19,8 +19,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\src\HexStrategy.Application\HexStrategy.Application.csproj" />
-    <ProjectReference Include="..\..\src\HexStrategy.Core\HexStrategy.Core.csproj" />
+    <ProjectReference Include="..\..\engine\HexStrategy.Application\HexStrategy.Application.csproj" />
+    <ProjectReference Include="..\..\engine\HexStrategy.Core\HexStrategy.Core.csproj" />
     <ProjectReference Include="..\..\games\HexStrategy.Game.KingOfTheHill\HexStrategy.Game.KingOfTheHill.csproj" />
   </ItemGroup>
 

@@ -19,7 +19,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\src\HexStrategy.Core\HexStrategy.Core.csproj" />
+    <ProjectReference Include="..\..\engine\HexStrategy.Core\HexStrategy.Core.csproj" />
   </ItemGroup>
 
 </Project>
