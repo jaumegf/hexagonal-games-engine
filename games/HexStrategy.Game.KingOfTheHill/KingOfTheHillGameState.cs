@@ -28,14 +28,20 @@ public sealed record KingOfTheHillGameState(
 
         var units = new[]
         {
-            new KingOfTheHillUnitState("p1a", "P1", new HexCoordinate(-2, 0)),
-            new KingOfTheHillUnitState("p1b", "P1", new HexCoordinate(-2, 1)),
-            new KingOfTheHillUnitState("p2a", "P2", new HexCoordinate(2, 0)),
-            new KingOfTheHillUnitState("p2b", "P2", new HexCoordinate(2, -1))
+            KingOfTheHillUnitState.CreateSingle("1A", "P1", new HexCoordinate(-2, 3)),
+            KingOfTheHillUnitState.CreateSingle("1B", "P1", new HexCoordinate(-1, 3)),
+            KingOfTheHillUnitState.CreateSingle("1C", "P1", new HexCoordinate(0, 3)),
+            KingOfTheHillUnitState.CreateSingle("1D", "P1", new HexCoordinate(1, 3)),
+            KingOfTheHillUnitState.CreateSingle("1E", "P1", new HexCoordinate(-1, 4)),
+            KingOfTheHillUnitState.CreateSingle("2A", "P2", new HexCoordinate(2, -3)),
+            KingOfTheHillUnitState.CreateSingle("2B", "P2", new HexCoordinate(1, -3)),
+            KingOfTheHillUnitState.CreateSingle("2C", "P2", new HexCoordinate(0, -3)),
+            KingOfTheHillUnitState.CreateSingle("2D", "P2", new HexCoordinate(-1, -3)),
+            KingOfTheHillUnitState.CreateSingle("2E", "P2", new HexCoordinate(0, -4))
         };
 
         return new KingOfTheHillGameState(
-            new HexBoard(radius: 2),
+            new HexBoard(CreateBoardCoordinates()),
             players,
             units,
             new Dictionary<string, int>
@@ -54,6 +60,29 @@ public sealed record KingOfTheHillGameState(
     public KingOfTheHillUnitState? FindUnit(string unitId) =>
         Units.SingleOrDefault(unit => string.Equals(unit.Id, unitId, StringComparison.OrdinalIgnoreCase));
 
+    public KingOfTheHillUnitState? FindUnitAt(HexCoordinate coordinate) =>
+        Units.SingleOrDefault(unit => unit.Position == coordinate);
+
     public bool IsOccupied(HexCoordinate coordinate) =>
-        Units.Any(unit => unit.Position == coordinate);
+        FindUnitAt(coordinate) is not null;
+
+    private static IReadOnlyList<HexCoordinate> CreateBoardCoordinates() =>
+        CreateCoordinatesFromRows(
+            (-4, -1, 3),
+            (-3, -1, 4),
+            (-2, -2, 5),
+            (-1, -2, 6),
+            (0, -3, 7),
+            (1, -3, 6),
+            (2, -3, 5),
+            (3, -2, 4),
+            (4, -2, 3));
+
+    private static IReadOnlyList<HexCoordinate> CreateCoordinatesFromRows(
+        params (int r, int startQ, int count)[] rows) =>
+        rows
+            .SelectMany(row => Enumerable
+                .Range(row.startQ, row.count)
+                .Select(q => new HexCoordinate(q, row.r)))
+            .ToArray();
 }

@@ -1,9 +1,15 @@
 type Coordinate = { q: number; r: number };
-type Unit = { id: string; ownerPlayerId: string; position: Coordinate };
+type Unit = {
+  id: string;
+  ownerPlayerId: string;
+  position: Coordinate;
+  memberUnitIds: string[];
+  strength: number;
+};
 type Player = { id: string; displayName: string; kind: string };
 type KingOfTheHillState = {
   gameDefinitionId: string;
-  board: { radius: number };
+  board: { radius: number; coordinates: Coordinate[] };
   players: Player[];
   units: Unit[];
   controlScores: Record<string, number>;
@@ -79,6 +85,7 @@ class CanvasBoardRenderer {
   private readonly radius = 56;
   private readonly origin = { x: 500, y: 380 };
   private hexCenters = new Map<string, { x: number; y: number }>();
+  private tileLayout = new Map<string, { rowIndex: number; x: number }>();
 
   constructor(private readonly canvas: HTMLCanvasElement) {
     const context = canvas.getContext("2d");
@@ -95,16 +102,20 @@ class CanvasBoardRenderer {
 
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
     this.hexCenters = new Map();
+    this.tileLayout = new Map();
 
-    for (let r = -state.board.radius; r <= state.board.radius; r += 1) {
-      const minQ = Math.max(-state.board.radius, -r - state.board.radius);
-      const maxQ = Math.min(state.board.radius, -r + state.board.radius);
+    const rows = this.buildRows(state.board.coordinates);
 
-      for (let q = minQ; q <= maxQ; q += 1) {
-        const coordinate = { q, r };
-        const center = this.toPixel(coordinate);
-        this.hexCenters.set(this.key(coordinate), center);
-        this.drawHex(state, coordinate, center, selectedUnit);
+    for (const [rowIndex, row] of rows.entries()) {
+      for (const item of row.coordinates) {
+        this.hexCenters.set(this.key(item.coordinate), item.center);
+        this.tileLayout.set(this.key(item.coordinate), { rowIndex, x: item.x });
+      }
+    }
+
+    for (const row of rows) {
+      for (const item of row.coordinates) {
+        this.drawHex(state, item.coordinate, item.center, selectedUnit);
       }
     }
 
@@ -139,12 +150,16 @@ class CanvasBoardRenderer {
     const isObjective =
       coordinate.q === state.objectiveCoordinate.q &&
       coordinate.r === state.objectiveCoordinate.r;
+    const occupyingUnit =
+      state.units.find(
+        unit => unit.position.q === coordinate.q && unit.position.r === coordinate.r
+      ) ?? null;
     const isSelectedDestination =
       selectedUnit !== null &&
-      this.distance(selectedUnit.position, coordinate) === 1 &&
-      !state.units.some(
-        unit => unit.position.q === coordinate.q && unit.position.r === coordinate.r
-      );
+      (selectedUnit.position.q !== coordinate.q ||
+        selectedUnit.position.r !== coordinate.r) &&
+      this.areAdjacent(selectedUnit.position, coordinate) &&
+      (occupyingUnit === null || occupyingUnit.ownerPlayerId === selectedUnit.ownerPlayerId);
 
     const points = this.hexPoints(center);
 
@@ -187,14 +202,13 @@ class CanvasBoardRenderer {
     ctx.fillStyle = "#ffffff";
     ctx.font = "bold 17px Segoe UI";
     ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText(unit.id.toUpperCase(), center.x, center.y);
-  }
+    ctx.textBaseline = "alphabetic";
+    ctx.fillText(unit.id.toUpperCase(), center.x, center.y - 2);
 
-  private toPixel(coordinate: Coordinate): { x: number; y: number } {
-    const x = this.radius * Math.sqrt(3) * (coordinate.q + coordinate.r / 2) + this.origin.x;
-    const y = this.radius * 1.5 * coordinate.r + this.origin.y;
-    return { x, y };
+    if (unit.strength > 1) {
+      ctx.font = "bold 13px Segoe UI";
+      ctx.fillText(`S${unit.strength}`, center.x, center.y + 16);
+    }
   }
 
   private hexPoints(center: { x: number; y: number }): Array<{ x: number; y: number }> {
@@ -209,14 +223,68 @@ class CanvasBoardRenderer {
     return points;
   }
 
+  private buildRows(coordinates: Coordinate[]): Array<{
+    r: number;
+    coordinates: Array<{ coordinate: Coordinate; center: { x: number; y: number } }>;
+  }> {
+    const groupedRows = new Map<number, Coordinate[]>();
+
+    for (const coordinate of coordinates) {
+      const row = groupedRows.get(coordinate.r) ?? [];
+      row.push(coordinate);
+      groupedRows.set(coordinate.r, row);
+    }
+
+    const rows = Array.from(groupedRows.entries())
+      .sort(([left], [right]) => left - right)
+      .map(([r, rowCoordinates]) => ({
+        r,
+        coordinates: rowCoordinates.sort((left, right) => left.q - right.q)
+      }));
+
+    const rowSpacing = this.radius * 1.5;
+    const columnSpacing = this.radius * Math.sqrt(3);
+
+    return rows.map((row, rowIndex) => {
+      const rowWidth = (row.coordinates.length - 1) * columnSpacing;
+      const startX = this.origin.x - rowWidth / 2;
+      const y = this.origin.y + (rowIndex - (rows.length - 1) / 2) * rowSpacing;
+
+      return {
+        r: row.r,
+        coordinates: row.coordinates.map((coordinate, columnIndex) => ({
+          coordinate,
+          x: -(row.coordinates.length - 1) / 2 + columnIndex,
+          center: {
+            x: startX + columnIndex * columnSpacing,
+            y
+          }
+        }))
+      };
+    });
+  }
+
   private key(coordinate: Coordinate): string {
     return `${coordinate.q},${coordinate.r}`;
   }
 
-  private distance(a: Coordinate, b: Coordinate): number {
-    const sA = -a.q - a.r;
-    const sB = -b.q - b.r;
-    return Math.max(Math.abs(a.q - b.q), Math.abs(a.r - b.r), Math.abs(sA - sB));
+  public areAdjacent(a: Coordinate, b: Coordinate): boolean {
+    const left = this.tileLayout.get(this.key(a));
+    const right = this.tileLayout.get(this.key(b));
+
+    if (!left || !right) {
+      return false;
+    }
+
+    if (left.rowIndex === right.rowIndex) {
+      return Math.abs(left.x - right.x) === 1;
+    }
+
+    if (Math.abs(left.rowIndex - right.rowIndex) === 1) {
+      return Math.abs(left.x - right.x) === 0.5;
+    }
+
+    return false;
   }
 }
 
@@ -288,7 +356,9 @@ function renderSelection(state: KingOfTheHillState, unit: SelectedUnit): void {
   selectionPanel.append(
     makeMetaRow("Selected Unit", unit.id),
     makeMetaRow("Owner", unit.ownerPlayerId),
-    makeMetaRow("Position", `${unit.position.q}, ${unit.position.r}`)
+    makeMetaRow("Position", `${unit.position.q}, ${unit.position.r}`),
+    makeMetaRow("Strength", `S${unit.strength}`),
+    makeMetaRow("Members", unit.memberUnitIds.join(", "))
   );
 }
 
@@ -327,6 +397,26 @@ canvas.addEventListener("click", async event => {
   );
 
   if (clickedUnit && clickedUnit.ownerPlayerId === currentMatch.state.currentPlayerId) {
+    if (
+      selectedUnit &&
+      selectedUnit.id !== clickedUnit.id &&
+      renderer.areAdjacent(selectedUnit.position, clickedUnit.position)
+    ) {
+      try {
+        currentMatch = await client.sendCommand(currentMatch.matchId, "move", {
+          unitId: selectedUnit.id,
+          q: coordinate.q.toString(),
+          r: coordinate.r.toString()
+        });
+        selectedUnit = null;
+        render();
+        pushLog(currentMatch.lastMessage);
+      } catch (error) {
+        pushLog((error as Error).message);
+      }
+      return;
+    }
+
     selectedUnit = clickedUnit;
     render();
     return;

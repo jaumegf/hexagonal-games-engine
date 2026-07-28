@@ -56,25 +56,56 @@ internal static class KingOfTheHillGameRules
             return GameCommandResult.Rejected(state, "A unit must move to an adjacent hex.");
         }
 
-        if (!unit.Position.IsAdjacentTo(target))
+        if (!state.Board.AreAdjacent(unit.Position, target))
         {
             return GameCommandResult.Rejected(state, $"Target {target} is not adjacent to {unit.Position}.");
         }
 
-        if (state.IsOccupied(target))
+        var targetUnit = state.FindUnitAt(target);
+
+        if (targetUnit is not null &&
+            !string.Equals(targetUnit.OwnerPlayerId, unit.OwnerPlayerId, StringComparison.OrdinalIgnoreCase))
         {
             return GameCommandResult.Rejected(state, $"Target {target} is already occupied.");
         }
 
-        var updatedUnits = state.Units
-            .Select(existingUnit => existingUnit.Id == unit.Id ? existingUnit with { Position = target } : existingUnit)
-            .ToArray();
+        IReadOnlyList<KingOfTheHillUnitState> updatedUnits;
+        string actionMessage;
+
+        if (targetUnit is null)
+        {
+            updatedUnits = state.Units
+                .Select(existingUnit => existingUnit.Id == unit.Id ? existingUnit with { Position = target } : existingUnit)
+                .OrderBy(existingUnit => existingUnit.Id, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            actionMessage = $"{state.CurrentPlayer.DisplayName} moved {unit.Id} to {target}.";
+        }
+        else
+        {
+            var mergedMemberIds = unit.MemberUnitIds
+                .Concat(targetUnit.MemberUnitIds)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(memberId => memberId, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            var mergedUnit = new KingOfTheHillUnitState(
+                mergedMemberIds[0],
+                unit.OwnerPlayerId,
+                target,
+                mergedMemberIds);
+
+            updatedUnits = state.Units
+                .Where(existingUnit => existingUnit.Id != unit.Id && existingUnit.Id != targetUnit.Id)
+                .Append(mergedUnit)
+                .OrderBy(existingUnit => existingUnit.Id, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            actionMessage = $"{state.CurrentPlayer.DisplayName} merged {unit.Id} into {targetUnit.Id} at {target} (S{mergedUnit.Strength}).";
+        }
 
         var movedState = state with { Units = updatedUnits };
 
-        return EndTurn(
-            movedState,
-            $"{state.CurrentPlayer.DisplayName} moved {unit.Id} to {target}.");
+        return EndTurn(movedState, actionMessage);
     }
 
     private static GameCommandResult EndTurn(KingOfTheHillGameState state, string actionMessage)

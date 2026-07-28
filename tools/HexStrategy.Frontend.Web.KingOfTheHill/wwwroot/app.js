@@ -35,6 +35,7 @@ class CanvasBoardRenderer {
     this.radius = 56;
     this.origin = { x: 500, y: 380 };
     this.hexCenters = new Map();
+    this.tileLayout = new Map();
     const context = canvas.getContext("2d");
     if (!context) {
       throw new Error("Canvas 2D context is not available.");
@@ -46,14 +47,17 @@ class CanvasBoardRenderer {
     const state = match.state;
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
     this.hexCenters = new Map();
-    for (let r = -state.board.radius; r <= state.board.radius; r += 1) {
-      const minQ = Math.max(-state.board.radius, -r - state.board.radius);
-      const maxQ = Math.min(state.board.radius, -r + state.board.radius);
-      for (let q = minQ; q <= maxQ; q += 1) {
-        const coordinate = { q, r };
-        const center = this.toPixel(coordinate);
-        this.hexCenters.set(this.key(coordinate), center);
-        this.drawHex(state, coordinate, center, selectedUnit);
+    this.tileLayout = new Map();
+    const rows = this.buildRows(state.board.coordinates);
+    for (const [rowIndex, row] of rows.entries()) {
+      for (const item of row.coordinates) {
+        this.hexCenters.set(this.key(item.coordinate), item.center);
+        this.tileLayout.set(this.key(item.coordinate), { rowIndex, x: item.x });
+      }
+    }
+    for (const row of rows) {
+      for (const item of row.coordinates) {
+        this.drawHex(state, item.coordinate, item.center, selectedUnit);
       }
     }
     for (const unit of state.units) {
@@ -77,7 +81,10 @@ class CanvasBoardRenderer {
   drawHex(state, coordinate, center, selectedUnit) {
     const ctx = this.context;
     const isObjective = coordinate.q === state.objectiveCoordinate.q && coordinate.r === state.objectiveCoordinate.r;
-    const isSelectedDestination = selectedUnit !== null && this.distance(selectedUnit.position, coordinate) === 1 && !state.units.some((unit) => unit.position.q === coordinate.q && unit.position.r === coordinate.r);
+    const occupyingUnit = state.units.find(
+      (unit) => unit.position.q === coordinate.q && unit.position.r === coordinate.r
+    ) ?? null;
+    const isSelectedDestination = selectedUnit !== null && (selectedUnit.position.q !== coordinate.q || selectedUnit.position.r !== coordinate.r) && this.areAdjacent(selectedUnit.position, coordinate) && (occupyingUnit === null || occupyingUnit.ownerPlayerId === selectedUnit.ownerPlayerId);
     const points = this.hexPoints(center);
     ctx.beginPath();
     ctx.moveTo(points[0].x, points[0].y);
@@ -113,13 +120,12 @@ class CanvasBoardRenderer {
     ctx.fillStyle = "#ffffff";
     ctx.font = "bold 17px Segoe UI";
     ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText(unit.id.toUpperCase(), center.x, center.y);
-  }
-  toPixel(coordinate) {
-    const x = this.radius * Math.sqrt(3) * (coordinate.q + coordinate.r / 2) + this.origin.x;
-    const y = this.radius * 1.5 * coordinate.r + this.origin.y;
-    return { x, y };
+    ctx.textBaseline = "alphabetic";
+    ctx.fillText(unit.id.toUpperCase(), center.x, center.y - 2);
+    if (unit.strength > 1) {
+      ctx.font = "bold 13px Segoe UI";
+      ctx.fillText(`S${unit.strength}`, center.x, center.y + 16);
+    }
   }
   hexPoints(center) {
     const points = [];
@@ -132,13 +138,52 @@ class CanvasBoardRenderer {
     }
     return points;
   }
+  buildRows(coordinates) {
+    const groupedRows = new Map();
+    for (const coordinate of coordinates) {
+      const row = groupedRows.get(coordinate.r) ?? [];
+      row.push(coordinate);
+      groupedRows.set(coordinate.r, row);
+    }
+    const rows = Array.from(groupedRows.entries()).sort(([left], [right]) => left - right).map(([r, rowCoordinates]) => ({
+      r,
+      coordinates: rowCoordinates.sort((left, right) => left.q - right.q)
+    }));
+    const rowSpacing = this.radius * 1.5;
+    const columnSpacing = this.radius * Math.sqrt(3);
+    return rows.map((row, rowIndex) => {
+      const rowWidth = (row.coordinates.length - 1) * columnSpacing;
+      const startX = this.origin.x - rowWidth / 2;
+      const y = this.origin.y + (rowIndex - (rows.length - 1) / 2) * rowSpacing;
+      return {
+        r: row.r,
+        coordinates: row.coordinates.map((coordinate, columnIndex) => ({
+          coordinate,
+          x: -(row.coordinates.length - 1) / 2 + columnIndex,
+          center: {
+            x: startX + columnIndex * columnSpacing,
+            y
+          }
+        }))
+      };
+    });
+  }
   key(coordinate) {
     return `${coordinate.q},${coordinate.r}`;
   }
-  distance(a, b) {
-    const sA = -a.q - a.r;
-    const sB = -b.q - b.r;
-    return Math.max(Math.abs(a.q - b.q), Math.abs(a.r - b.r), Math.abs(sA - sB));
+  areAdjacent(a, b) {
+    const left = this.tileLayout.get(this.key(a));
+    const right = this.tileLayout.get(this.key(b));
+    if (!left || !right) {
+      return false;
+    }
+    if (left.rowIndex === right.rowIndex) {
+      return Math.abs(left.x - right.x) === 1;
+    }
+    if (Math.abs(left.rowIndex - right.rowIndex) === 1) {
+      return Math.abs(left.x - right.x) === 0.5;
+    }
+    return false;
   }
 }
 const config = window.kingOfTheHillConfig ?? {};
@@ -194,7 +239,9 @@ function renderSelection(state, unit) {
   selectionPanel.append(
     makeMetaRow("Selected Unit", unit.id),
     makeMetaRow("Owner", unit.ownerPlayerId),
-    makeMetaRow("Position", `${unit.position.q}, ${unit.position.r}`)
+    makeMetaRow("Position", `${unit.position.q}, ${unit.position.r}`),
+    makeMetaRow("Strength", `S${unit.strength}`),
+    makeMetaRow("Members", unit.memberUnitIds.join(", "))
   );
 }
 function makeMetaRow(label, value) {
@@ -224,6 +271,21 @@ canvas.addEventListener("click", async (event) => {
   }
   const clickedUnit = currentMatch.state.units.find((unit) => unit.position.q === coordinate.q && unit.position.r === coordinate.r);
   if (clickedUnit && clickedUnit.ownerPlayerId === currentMatch.state.currentPlayerId) {
+    if (selectedUnit && selectedUnit.id !== clickedUnit.id && renderer.areAdjacent(selectedUnit.position, clickedUnit.position)) {
+      try {
+        currentMatch = await client.sendCommand(currentMatch.matchId, "move", {
+          unitId: selectedUnit.id,
+          q: coordinate.q.toString(),
+          r: coordinate.r.toString()
+        });
+        selectedUnit = null;
+        render();
+        pushLog(currentMatch.lastMessage);
+      } catch (error) {
+        pushLog(error.message);
+      }
+      return;
+    }
     selectedUnit = clickedUnit;
     render();
     return;

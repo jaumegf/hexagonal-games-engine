@@ -4,7 +4,7 @@
 
 This document defines the rules for the specific game implemented in the `HexStrategy.Game.KingOfTheHill` project.
 
-`King of the Hill` is a minimal two-player hex control game used to validate the current engine slice in console mode.
+`King of the Hill` is a minimal two-player hex control game used to validate the current engine slice in console and web mode.
 
 ## Players
 
@@ -15,18 +15,31 @@ This document defines the rules for the specific game implemented in the `HexStr
 
 ## Board
 
-- fixed hex board with radius `2`
+- fixed custom hex board centered on `(0,0)`
+- visible row sizes from top to bottom are `3-4-5-6-7-6-5-4-3`
 - the objective cell is the center hex at coordinate `(0,0)`
 - the board is not randomized
 
 ## Units
 
-- each player starts with 2 units
-- `Player 1` starts with `p1a` at `(-2,0)` and `p1b` at `(-2,1)`
-- `Player 2` starts with `p2a` at `(2,0)` and `p2b` at `(2,-1)`
+- each player starts with 5 units
+- `Player 1` starts with:
+  - `1A` at `(-2,3)`
+  - `1B` at `(-1,3)`
+  - `1C` at `(0,3)`
+  - `1D` at `(1,3)`
+  - `1E` at `(-1,4)`
+- `Player 2` starts with:
+  - `2A` at `(2,-3)`
+- `2B` at `(1,-3)`
+- `2C` at `(0,-3)`
+- `2D` at `(-1,-3)`
+- `2E` at `(0,-4)`
 - units do not attack
-- units do not stack
 - units belong to exactly one player
+- each active block has a strength value `S`
+- a single unit starts with `S = 1`
+- friendly units may merge into larger blocks
 
 ## Turn Structure
 
@@ -40,8 +53,13 @@ This document defines the rules for the specific game implemented in the `HexStr
 
 - a move must target a hex inside the board
 - a move must target an adjacent hex
-- a move cannot target an occupied hex
+- a move into an enemy-occupied hex is not allowed
+- a move into a friendly-occupied adjacent hex merges both blocks
 - a player may only move their own units
+- after a merge, the resulting block strength is the total number of member units
+- after a merge, the surviving block reference is the alphabetically lowest member id
+- non-surviving member ids stop being direct move references
+- moving a block moves all of its combined strength as one military group
 
 ## Control And Victory
 

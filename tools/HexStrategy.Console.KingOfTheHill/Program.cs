@@ -17,6 +17,7 @@ while (true)
     Console.WriteLine(KingOfTheHillConsoleBoardRenderer.Render(state));
     Console.WriteLine($"Current player: {state.CurrentPlayer.DisplayName}");
     Console.WriteLine($"Score: P1={state.ControlScores["P1"]} | P2={state.ControlScores["P2"]}");
+    Console.WriteLine($"Active blocks: {string.Join(", ", state.Units.Select(unit => $"{unit.Id}(S{unit.Strength})"))}");
 
     if (state.IsCompleted)
     {
