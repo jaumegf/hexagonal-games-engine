@@ -1,0 +1,13 @@
+bin/
+obj/
+.appdata/
+.dotnet-home/
+.home/
+.nuget/
+.userprofile/
+NuGet/
+.vs/HexStrategy/DesignTimeBuild
+.vs/HexStrategy/FileContentIndex
+.vs/HexStrategy/v17/.suo
+.vs/HexStrategy/v17/.futdcache.v2
+.vs

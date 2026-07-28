@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\HexStrategy.Application\HexStrategy.Application.csproj" />
+    <ProjectReference Include="..\HexStrategy.Core\HexStrategy.Core.csproj" />
+    <ProjectReference Include="..\HexStrategy.Session\HexStrategy.Session.csproj" />
+    <ProjectReference Include="..\..\games\HexStrategy.Game.KingOfTheHill\HexStrategy.Game.KingOfTheHill.csproj" />
+  </ItemGroup>
+
+</Project>
