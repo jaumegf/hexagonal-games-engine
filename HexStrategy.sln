@@ -24,7 +24,7 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HexStrategy.Application", "
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HexStrategy.Session", "engine\HexStrategy.Session\HexStrategy.Session.csproj", "{42D1D4DD-C138-41C7-B224-FC53F664DFE5}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HexStrategy.Host.Web", "hosts\HexStrategy.Host.Web\HexStrategy.Host.Web.csproj", "{6775A50D-9FF9-400E-8BF3-A39AC010FE3A}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HexStrategy.Host.Api", "hosts\HexStrategy.Host.Api\HexStrategy.Host.Api.csproj", "{6775A50D-9FF9-400E-8BF3-A39AC010FE3A}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HexStrategy.Game.KingOfTheHill", "games\HexStrategy.Game.KingOfTheHill\HexStrategy.Game.KingOfTheHill.csproj", "{BB2B7F04-E32F-44B2-86DC-EA966DC50502}"
 EndProject

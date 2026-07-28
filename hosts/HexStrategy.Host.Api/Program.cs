@@ -34,14 +34,14 @@ app.UseCors();
 
 app.MapGet("/", () => Results.Ok(new
 {
-    Service = "HexStrategy.Host.Web",
+    Service = "HexStrategy.Host.Api",
     Message = "Use /api for the backend endpoints."
 }));
 
 app.MapGet("/health", () => Results.Ok(new { Status = "Healthy" }));
 
 app.MapGet("/api", (GameCatalog catalog) => Results.Ok(new ApiRootResponse(
-    "HexStrategy.Host.Web",
+    "HexStrategy.Host.Api",
     catalog.Definitions
         .OrderBy(definition => definition.Metadata.DisplayName)
         .Select(definition => new GameDefinitionResponse(

@@ -12,8 +12,8 @@ The repository still keeps the architecture intentionally small, but it now incl
   Application layer around the core. It coordinates use cases, command handling, validation flow, and application-facing outcomes.
 - `engine/HexStrategy.Session`
   Runtime hosting/session concerns outside logical game state, such as active sessions, slot assignment, and connection-related runtime context.
-- `hosts/HexStrategy.Host.Web`
-  ASP.NET Core composition root. It wires dependencies and exposes generic backend APIs without serving a specific game's frontend.
+- `hosts/HexStrategy.Host.Api`
+  ASP.NET Core API host. It wires dependencies and exposes generic backend APIs without serving a specific game's frontend or opening a browser UI.
 - `games/HexStrategy.Game.KingOfTheHill`
   Example game module implementing the sample game's initial setup, move validation, and win condition without placing those rules in the reusable engine.
   Each game project should also carry its own `rules.md` document describing the playable rules of that specific game.
@@ -32,7 +32,7 @@ The intended dependency flow is:
 `HexStrategy.Core`
 `<- HexStrategy.Application`
 `<- HexStrategy.Session`
-`<- HexStrategy.Host.Web`
+`<- HexStrategy.Host.Api`
 
 Additional rules:
 
