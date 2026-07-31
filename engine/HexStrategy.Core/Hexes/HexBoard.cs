@@ -38,54 +38,69 @@ public sealed class HexBoard
     public bool AreAdjacent(HexCoordinate from, HexCoordinate to) =>
         adjacentPairs.Contains((from, to));
 
+    public IReadOnlyList<HexCoordinate> GetReachableCoordinates(HexCoordinate origin, int maxDepth)
+    {
+        if (maxDepth < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxDepth), "Depth must be zero or greater.");
+        }
+
+        if (!Contains(origin) || maxDepth == 0)
+        {
+            return [];
+        }
+
+        var visited = new HashSet<HexCoordinate> { origin };
+        var depths = new Dictionary<HexCoordinate, int> { [origin] = 0 };
+        var queue = new Queue<HexCoordinate>();
+        queue.Enqueue(origin);
+
+        while (queue.Count > 0)
+        {
+            var current = queue.Dequeue();
+            var currentDepth = depths[current];
+
+            if (currentDepth >= maxDepth)
+            {
+                continue;
+            }
+
+            foreach (var neighbor in GetAdjacentCoordinates(current))
+            {
+                if (!visited.Add(neighbor))
+                {
+                    continue;
+                }
+
+                depths[neighbor] = currentDepth + 1;
+                queue.Enqueue(neighbor);
+            }
+        }
+
+        return Coordinates
+            .Where(coordinate => coordinate != origin && visited.Contains(coordinate))
+            .ToArray();
+    }
+
     public IReadOnlyList<HexCoordinate> GetCoordinatesForRow(int r) =>
         Coordinates.Where(coordinate => coordinate.R == r).ToArray();
+
+    public IReadOnlyList<HexCoordinate> GetAdjacentCoordinates(HexCoordinate coordinate) =>
+        Coordinates
+            .Where(candidate => adjacentPairs.Contains((coordinate, candidate)))
+            .ToArray();
 
     private static HashSet<(HexCoordinate From, HexCoordinate To)> BuildAdjacentPairs(
         IReadOnlyList<HexCoordinate> coordinates)
     {
-        var rows = coordinates
-            .GroupBy(coordinate => coordinate.R)
-            .OrderBy(group => group.Key)
-            .Select((group, rowIndex) =>
-            {
-                var orderedCoordinates = group.OrderBy(coordinate => coordinate.Q).ToArray();
-                var startX = -(orderedCoordinates.Length - 1) / 2.0;
-
-                return new
-                {
-                    RowIndex = rowIndex,
-                    Tiles = orderedCoordinates
-                        .Select((coordinate, columnIndex) => new
-                        {
-                            Coordinate = coordinate,
-                            X = startX + columnIndex
-                        })
-                        .ToArray()
-                };
-            })
-            .ToArray();
-
         var pairs = new HashSet<(HexCoordinate From, HexCoordinate To)>();
-
-        foreach (var row in rows)
+        for (var index = 0; index < coordinates.Count; index++)
         {
-            foreach (var pair in row.Tiles.Zip(row.Tiles.Skip(1)))
+            for (var otherIndex = index + 1; otherIndex < coordinates.Count; otherIndex++)
             {
-                AddPair(pairs, pair.First.Coordinate, pair.Second.Coordinate);
-            }
-        }
-
-        foreach (var rowPair in rows.Zip(rows.Skip(1)))
-        {
-            foreach (var upper in rowPair.First.Tiles)
-            {
-                foreach (var lower in rowPair.Second.Tiles)
+                if (coordinates[index].DistanceTo(coordinates[otherIndex]) == 1)
                 {
-                    if (Math.Abs(upper.X - lower.X) == 0.5)
-                    {
-                        AddPair(pairs, upper.Coordinate, lower.Coordinate);
-                    }
+                    AddPair(pairs, coordinates[index], coordinates[otherIndex]);
                 }
             }
         }

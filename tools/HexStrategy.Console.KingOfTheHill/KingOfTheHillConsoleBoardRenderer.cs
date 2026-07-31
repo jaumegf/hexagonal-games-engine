@@ -13,10 +13,10 @@ internal static class KingOfTheHillConsoleBoardRenderer
         };
 
         var rows = state.Board.Coordinates
-            .GroupBy(ToOddQOffsetRow)
+            .GroupBy(coordinate => coordinate.R)
             .OrderBy(group => group.Key)
             .Select(group => group
-                .OrderBy(ToOddQOffsetColumn)
+                .OrderBy(coordinate => coordinate.Q)
                 .ToArray())
             .ToArray();
         var maxRowLength = rows.Max(row => row.Length);

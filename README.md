@@ -11,7 +11,7 @@ The repository still keeps the architecture intentionally small, but it now incl
 - `engine/HexStrategy.Application`
   Application layer around the core. It coordinates use cases, command handling, validation flow, and application-facing outcomes.
 - `engine/HexStrategy.Session`
-  Runtime hosting/session concerns outside logical game state, such as active sessions, slot assignment, and connection-related runtime context.
+  Runtime hosting/session concerns outside logical game state, such as active sessions, slot assignment, connection-related runtime context, and orchestration of automated turns requested by a client.
 - `hosts/HexStrategy.Host.Api`
   ASP.NET Core API host. It wires dependencies and exposes generic backend APIs without serving a specific game's frontend or opening a browser UI.
 - `games/HexStrategy.Game.KingOfTheHill`
@@ -61,7 +61,7 @@ Examples of what does not belong in Core:
 - local vs remote human distinctions
 - rendering/UI code
 - filesystem or database persistence
-- AI decision-making logic
+- reusable AI decision contracts or telemetry shapes when they are genuinely engine-agnostic
 - rules of any specific game
 
 ## What Belongs In Game Projects
@@ -107,6 +107,7 @@ The following areas are intentionally deferred to later tasks:
 This scaffolding keeps the important boundaries intact:
 
 - `IGameDefinition` is intentionally minimal and only covers state creation plus command execution.
+- Automated turn execution remains session/application orchestration, while game-specific AI policies stay inside the concrete game project.
 - The sample game lives outside the engine and plugs into application/console composition without moving its rules into Core.
 - Session concerns are kept separate from semantic player identity in Core.
-- No speculative persistence, AI, transport, or rendering abstractions were introduced.
+- No speculative persistence, transport, or rendering abstractions were introduced beyond what the playable sample currently needs.

@@ -5,4 +5,5 @@ namespace HexStrategy.Session.Matches;
 public sealed record ActiveGameMatch(
     Guid MatchId,
     GameMatch Match,
-    string LastMessage);
+    string LastMessage,
+    HexStrategy.Core.Commands.AutomatedDecisionTelemetry? LastAutomatedDecisionTelemetry = null);

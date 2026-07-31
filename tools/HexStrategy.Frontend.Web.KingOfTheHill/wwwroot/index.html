@@ -4,47 +4,161 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>HexStrategy | King of the Hill</title>
-  <link rel="stylesheet" href="./styles.css">
+  <link rel="stylesheet" href="./styles.css?v=20260731a">
 </head>
 <body>
   <div class="shell">
+    <header class="topbar">
+      <div class="topbar-actions">
+        <button id="pass-button" class="toolbar-button" type="button">Pass Turn</button>
+      </div>
+
+      <div class="topbar-meta">
+        <button id="stop-button" class="toolbar-button toolbar-button-secondary" type="button" disabled>Pause</button>
+        <button id="resume-button" class="toolbar-button toolbar-button-secondary" type="button" disabled>Resume</button>
+        <button id="new-match-button" class="toolbar-button toolbar-button-secondary" type="button">New Match</button>
+      </div>
+    </header>
+
     <aside class="sidebar">
-      <h1>King of the Hill</h1>
-      <p class="subtitle">Canvas tool for manually testing the game flow.</p>
+      <details class="panel panel-collapsible" open>
+        <summary class="panel-summary">Debug</summary>
+        <div class="debug-panel">
+          <button id="undo-stop-button" class="toolbar-button toolbar-button-secondary debug-button" type="button">Undo &amp; Pause</button>
+          <label class="debug-toggle">
+            <input id="gameplay-view-checkbox" type="checkbox" checked>
+            <span>Gameplay view</span>
+          </label>
+        </div>
+      </details>
 
-      <section class="panel">
-        <h2>Match</h2>
+      <details class="panel panel-collapsible" open>
+        <summary class="panel-summary">Match</summary>
         <div id="match-meta" class="meta-list"></div>
-        <button id="new-match-button" type="button">New Match</button>
-        <button id="pass-button" type="button">Pass Turn</button>
-      </section>
+        <div id="match-setup-meta" class="meta-list"></div>
+      </details>
 
-      <section class="panel">
-        <h2>Selection</h2>
+      <details class="panel panel-collapsible" open>
+        <summary class="panel-summary">Selection</summary>
         <div id="selection-panel" class="meta-list"></div>
-      </section>
+      </details>
 
-      <section class="panel">
-        <h2>Help</h2>
+      <details class="panel panel-collapsible" open>
+        <summary class="panel-summary">Log</summary>
+        <div id="log-panel" class="log-panel"></div>
+      </details>
+
+      <details class="panel panel-collapsible">
+        <summary class="panel-summary">AI Telemetry</summary>
+        <div id="ai-status-panel" class="ai-status-panel">No automated turn has been executed yet.</div>
+        <div id="ai-telemetry-panel" class="meta-list"></div>
+      </details>
+
+      <details class="panel panel-collapsible">
+        <summary class="panel-summary">Help</summary>
         <ul>
           <li>Click one of the active player's units to select it.</li>
-          <li>Click an adjacent hex to attempt a move.</li>
+          <li>Click the same unit again, or use Clear Selection, to cancel selection.</li>
+          <li>Single units may move up to two hexes. Stacked blocks may move one.</li>
+          <li>Gold hexes are normal moves. Teal hexes are friendly merges.</li>
+          <li>Green hexes are favorable attacks that can eliminate the enemy block.</li>
           <li>Use Pass Turn to keep control of the hill.</li>
         </ul>
-      </section>
-
-      <section class="panel">
-        <h2>Log</h2>
-        <div id="log-panel" class="log-panel"></div>
-      </section>
+        <div class="legend">
+          <div class="legend-item">
+            <span class="legend-swatch move"></span>
+            <span>Move</span>
+          </div>
+          <div class="legend-item">
+            <span class="legend-swatch merge"></span>
+            <span>Merge</span>
+          </div>
+          <div class="legend-item">
+            <span class="legend-swatch attack"></span>
+            <span>Attack</span>
+          </div>
+        </div>
+      </details>
     </aside>
 
     <main class="board-area">
-      <canvas id="game-canvas" width="1000" height="800"></canvas>
+      <section id="turn-banner" class="turn-banner turn-banner-p1">
+        <div class="turn-banner-main">
+          <div id="turn-banner-player" class="turn-banner-player">P1</div>
+        </div>
+      </section>
+      <section id="score-banner" class="score-banner" aria-label="Match summary">
+        <div id="score-banner-p1" class="score-pill score-pill-p1">P1 0 | U0 | S0</div>
+        <div id="score-banner-p2" class="score-pill score-pill-p2">P2 0 | U0 | S0</div>
+      </section>
+      <div id="board-hint" class="board-hint hidden">Click one of your units</div>
+      <button id="clear-selection-button" class="board-clear-selection hidden" type="button" disabled>Clear Selection</button>
+      <div id="resolution-banner" class="resolution-banner hidden" aria-live="polite"></div>
+      <canvas id="game-canvas" width="1012" height="836"></canvas>
     </main>
   </div>
 
-  <script src="./config.js"></script>
-  <script type="module" src="./app.js"></script>
+  <div id="winner-modal" class="modal-backdrop hidden" aria-hidden="true">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="winner-title">
+      <div class="modal-kicker">Match Complete</div>
+      <h2 id="winner-title">Player 1 wins</h2>
+      <p id="winner-message">The hill has been decided.</p>
+      <button id="winner-new-match-button" type="button">Start New Match</button>
+    </div>
+  </div>
+
+  <div id="confirm-new-match-modal" class="modal-backdrop hidden" aria-hidden="true">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="confirm-new-match-title">
+      <div class="modal-kicker">Confirmation</div>
+      <h2 id="confirm-new-match-title">Start a new match?</h2>
+      <p>The current match state will be lost.</p>
+      <label class="modal-toggle">
+        <input id="confirm-new-match-rewind-checkbox" type="checkbox">
+        <span>Rewind last movement</span>
+      </label>
+      <div class="modal-actions">
+        <button id="confirm-new-match-load-button" type="button">Load Last Match</button>
+        <button id="confirm-new-match-accept-button" type="button">Start New Match</button>
+        <button id="confirm-new-match-cancel-button" class="secondary" type="button">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="match-setup-modal" class="modal-backdrop hidden" aria-hidden="true">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="match-setup-title">
+      <div class="modal-kicker">Match Setup</div>
+      <h2 id="match-setup-title">Start a new match</h2>
+      <div class="setup-grid">
+        <label class="setup-field">
+          <span>Player 1</span>
+          <select id="player-1-kind-select">
+            <option value="Human">Human</option>
+            <option value="IA4">IA4</option>
+          </select>
+        </label>
+        <label class="setup-field">
+          <span>Player 2</span>
+          <select id="player-2-kind-select">
+            <option value="Human">Human</option>
+            <option value="IA4">IA4</option>
+          </select>
+        </label>
+      </div>
+      <p class="setup-note">Choose Human or the current reference AI profile for each side.</p>
+      <p class="setup-note">Victory: hold the Hill until the opponent cannot exceed the strength on Objective. If your adjacent pressure is higher than the defender's total hill defense, the defender loses 1S at end turn.</p>
+      <label class="modal-toggle">
+        <input id="match-setup-rewind-checkbox" type="checkbox">
+        <span>Rewind last movement</span>
+      </label>
+      <div class="modal-actions">
+        <button id="match-setup-load-button" type="button">Load Last Match</button>
+        <button id="match-setup-start-button" type="button">Start Match</button>
+        <button id="match-setup-cancel-button" class="secondary" type="button">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="./config.js?v=20260729c"></script>
+  <script type="module" src="./app.js?v=20260731a"></script>
 </body>
 </html>
