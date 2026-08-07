@@ -8,6 +8,9 @@ internal static class KingOfTheHillGameRules
     public static GameCommandResult Execute(KingOfTheHillGameState state, GameCommand command)
         => Execute(state, command, evaluateVictory: true);
 
+    internal static GameCommandResult Preview(KingOfTheHillGameState state, GameCommand command)
+        => Execute(state, command, evaluateVictory: false);
+
     private static GameCommandResult Execute(
         KingOfTheHillGameState state,
         GameCommand command,
@@ -52,7 +55,7 @@ internal static class KingOfTheHillGameRules
         }
 
         var target = new HexCoordinate(q, r);
-        var movementDepth = unit.Strength == 1 ? 2 : 1;
+        var movementDepth = GetMovementDepth(unit, target);
         var reachableCoordinates = state.Board.GetReachableCoordinates(unit.Position, movementDepth);
 
         if (!state.Board.Contains(target))
@@ -70,6 +73,13 @@ internal static class KingOfTheHillGameRules
             return GameCommandResult.Rejected(
                 state,
                 $"Target {target} is outside the movement range of {unit.Id} (max depth {movementDepth}).");
+        }
+
+        if (!CanRoleOccupyCoordinate(unit, target))
+        {
+            return GameCommandResult.Rejected(
+                state,
+                $"{unit.Id} ({unit.Role}) cannot enter {DescribeRing(target)}.");
         }
 
         if (!HasTraversablePath(state, unit, target, movementDepth))
@@ -106,6 +116,13 @@ internal static class KingOfTheHillGameRules
         }
         else if (string.Equals(targetUnit.OwnerPlayerId, unit.OwnerPlayerId, StringComparison.OrdinalIgnoreCase))
         {
+            if (unit.Role == KingOfTheHillUnitRole.Defender || targetUnit.Role == KingOfTheHillUnitRole.Defender)
+            {
+                return GameCommandResult.Rejected(
+                    state,
+                    $"Defender units cannot merge.");
+            }
+
             var mergedStrength = unit.Strength + targetUnit.Strength;
             if (mergedStrength > KingOfTheHillGameState.MaximumBlockStrength)
             {
@@ -144,15 +161,54 @@ internal static class KingOfTheHillGameRules
             actionMessage = $"{state.CurrentPlayer.DisplayName} attacked and eliminated {targetUnit.Id} with {unit.Id} at {target}.";
         }
 
-        var updatedRetiredDefenderIds = GetUpdatedRetiredDefenderIds(state, updatedUnits, unit, targetUnit, target);
-        var defenderRoleMessage = BuildDefenderRoleMessage(state.RetiredDefenderIds, updatedRetiredDefenderIds);
         var movedState = state with
         {
-            Units = updatedUnits,
-            RetiredDefenderIds = updatedRetiredDefenderIds
+            Units = updatedUnits
         };
 
-        return EndTurn(state, movedState, actionMessage, defenderRoleMessage, evaluateVictory);
+        return EndTurn(state, movedState, actionMessage, null, evaluateVictory);
+    }
+
+    private static int GetMovementDepth(
+        KingOfTheHillUnitState unit,
+        HexCoordinate target)
+    {
+        if (unit.Role != KingOfTheHillUnitRole.Single)
+        {
+            return 1;
+        }
+
+        var sourceRing = unit.Position.DistanceTo(HexCoordinate.Origin);
+        var targetRing = target.DistanceTo(HexCoordinate.Origin);
+
+        return targetRing < sourceRing ? 1 : 2;
+    }
+
+    private static bool CanRoleOccupyCoordinate(
+        KingOfTheHillUnitState unit,
+        HexCoordinate coordinate)
+    {
+        var ring = coordinate.DistanceTo(HexCoordinate.Origin);
+
+        return unit.Role switch
+        {
+            KingOfTheHillUnitRole.Single => true,
+            KingOfTheHillUnitRole.Double => ring >= 1,
+            KingOfTheHillUnitRole.Defender => ring >= 2,
+            KingOfTheHillUnitRole.Attacker => ring >= 2,
+            _ => false
+        };
+    }
+
+    private static string DescribeRing(HexCoordinate coordinate)
+    {
+        var ring = coordinate.DistanceTo(HexCoordinate.Origin);
+        return ring switch
+        {
+            0 => "Objective",
+            1 => "r1",
+            _ => $"r{ring}"
+        };
     }
 
     private static bool HasTraversablePath(
@@ -214,46 +270,6 @@ internal static class KingOfTheHillGameRules
         return true;
     }
 
-    private static IReadOnlyCollection<string> GetUpdatedRetiredDefenderIds(
-        KingOfTheHillGameState state,
-        IReadOnlyList<KingOfTheHillUnitState> updatedUnits,
-        KingOfTheHillUnitState movingUnit,
-        KingOfTheHillUnitState? targetUnit,
-        HexCoordinate target)
-    {
-        var retiredIds = new HashSet<string>(state.RetiredDefenderIds, StringComparer.OrdinalIgnoreCase);
-
-        if (target.DistanceTo(HexCoordinate.Origin) <= 1 &&
-            IsDefenderIdentifier(movingUnit.Id))
-        {
-            retiredIds.Add(movingUnit.Id);
-        }
-
-        if (target.DistanceTo(HexCoordinate.Origin) <= 1 &&
-            targetUnit is not null &&
-            string.Equals(targetUnit.OwnerPlayerId, movingUnit.OwnerPlayerId, StringComparison.OrdinalIgnoreCase) &&
-            IsDefenderIdentifier(targetUnit.Id))
-        {
-            retiredIds.Add(targetUnit.Id);
-        }
-
-        var activeDefenderIds = updatedUnits
-            .Where(unit => IsDefenderIdentifier(unit.Id) && !retiredIds.Contains(unit.Id))
-            .Select(unit => unit.Id)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-
-        if (activeDefenderIds.Length < 2)
-        {
-            foreach (var activeDefenderId in activeDefenderIds)
-            {
-                retiredIds.Add(activeDefenderId);
-            }
-        }
-
-        return retiredIds.ToArray();
-    }
-
     private static bool IsDefenderIdentifier(string unitId) =>
         unitId is "1T" or "1V" or "1X" or "2T" or "2V" or "2X";
 
@@ -264,35 +280,17 @@ internal static class KingOfTheHillGameRules
         string? defenderRoleMessage,
         bool evaluateVictory)
     {
-        var siegeState = ApplyObjectiveSiegePressure(state, out var siegeMessage);
-        var updatedScores = state.ControlScores.ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.OrdinalIgnoreCase);
-        var currentPlayerHasObjective = siegeState.Units.Any(unit =>
-            unit.OwnerPlayerId == state.CurrentPlayerId &&
-            unit.Position == HexCoordinate.Origin);
+        var singleOnObjective = state.Units.SingleOrDefault(unit =>
+            unit.Position == HexCoordinate.Origin &&
+            unit.Role == KingOfTheHillUnitRole.Single);
 
-        var controlAwarded = false;
-
-        if (currentPlayerHasObjective)
+        if (evaluateVictory && singleOnObjective is not null)
         {
-            updatedScores[state.CurrentPlayerId] += 1;
-            controlAwarded = true;
-        }
-
-        var nextPlayerId = siegeState.Players.First(player => player.Id != state.CurrentPlayerId).Id;
-        var firstPlayerId = siegeState.Players[0].Id;
-        var scoredState = siegeState with
-        {
-            ControlScores = updatedScores
-        };
-
-        if (evaluateVictory &&
-            TryResolveVictoryByMaterialExhaustion(scoredState, out var winnerPlayerId))
-        {
-            var winner = scoredState.Players.First(player => player.Id == winnerPlayerId);
-            var completedState = scoredState with
+            var winner = state.Players.First(player => player.Id == singleOnObjective.OwnerPlayerId);
+            var completedState = state with
             {
                 IsCompleted = true,
-                WinnerPlayerId = winnerPlayerId
+                WinnerPlayerId = winner.Id
             };
 
             return GameCommandResult.Success(
@@ -300,42 +298,23 @@ internal static class KingOfTheHillGameRules
                 ComposeTurnMessage(
                     actionMessage,
                     defenderRoleMessage,
-                    siegeMessage,
-                    $"{winner.DisplayName} wins. The opponent can no longer exceed the strength on Objective."));
+                    null,
+                    $"{winner.DisplayName} captures the Hill and wins."));
         }
 
-        var nextState = scoredState with
+        var nextPlayerId = state.Players.First(player => player.Id != state.CurrentPlayerId).Id;
+        var firstPlayerId = state.Players[0].Id;
+        var nextState = state with
         {
             CurrentPlayerId = nextPlayerId,
             TurnNumber = string.Equals(nextPlayerId, firstPlayerId, StringComparison.OrdinalIgnoreCase)
-                ? scoredState.TurnNumber + 1
-                : scoredState.TurnNumber
+                ? state.TurnNumber + 1
+                : state.TurnNumber
         };
 
-        var scoreMessage = controlAwarded
-            ? $"{state.CurrentPlayer.DisplayName} gains 1 control point."
-            : $"{state.CurrentPlayer.DisplayName} does not control the hill.";
-
-        return GameCommandResult.Success(nextState, ComposeTurnMessage(actionMessage, defenderRoleMessage, siegeMessage, scoreMessage));
-    }
-
-    private static string? BuildDefenderRoleMessage(
-        IReadOnlyCollection<string> previousRetiredDefenderIds,
-        IReadOnlyCollection<string> updatedRetiredDefenderIds)
-    {
-        var newlyRetiredIds = updatedRetiredDefenderIds
-            .Where(id => !previousRetiredDefenderIds.Contains(id, StringComparer.OrdinalIgnoreCase))
-            .OrderBy(id => id, StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-
-        if (newlyRetiredIds.Length == 0)
-        {
-            return null;
-        }
-
-        return newlyRetiredIds.Length == 1
-            ? $"Defender role retired for {newlyRetiredIds[0]}."
-            : $"Defender roles retired for {string.Join(", ", newlyRetiredIds)}.";
+        return GameCommandResult.Success(
+            nextState,
+            ComposeTurnMessage(actionMessage, defenderRoleMessage, null, $"{state.CurrentPlayer.DisplayName} ends the turn."));
     }
 
     private static bool TryResolveVictoryByMaterialExhaustion(
@@ -359,7 +338,7 @@ internal static class KingOfTheHillGameRules
             return false;
         }
 
-        if (CanPlayerStillRetakeObjective(state, trailingPlayerId, objectiveHolder.Strength))
+        if (CanPlayerStillRetakeObjective(state, trailingPlayerId))
         {
             return false;
         }
@@ -370,14 +349,101 @@ internal static class KingOfTheHillGameRules
 
     private static bool CanPlayerStillRetakeObjective(
         KingOfTheHillGameState state,
-        string playerId,
-        int defenderStrength)
+        string playerId)
     {
-        var remainingStrength = state.Units
-            .Where(unit => string.Equals(unit.OwnerPlayerId, playerId, StringComparison.OrdinalIgnoreCase))
+        var searchState = state with
+        {
+            CurrentPlayerId = playerId,
+            IsCompleted = false,
+            WinnerPlayerId = null
+        };
+
+        return CanPlayerBreakHillDefenseWithinTurns(searchState, playerId, remainingTurns: 2);
+    }
+
+    private static bool CanPlayerBreakHillDefenseWithinTurns(
+        KingOfTheHillGameState state,
+        string playerId,
+        int remainingTurns)
+    {
+        if (remainingTurns <= 0)
+        {
+            return false;
+        }
+
+        var legalCommands = KingOfTheHillAiMoveGenerator.GenerateLegalCommands(state, evaluateVictory: false);
+
+        foreach (var command in legalCommands)
+        {
+            var preview = Preview(state, command);
+            if (!preview.Accepted || preview.State is not KingOfTheHillGameState previewState)
+            {
+                continue;
+            }
+
+            if (DoesStateBreakHillDefense(previewState, playerId))
+            {
+                return true;
+            }
+
+            var continuedState = previewState with
+            {
+                CurrentPlayerId = playerId,
+                IsCompleted = false,
+                WinnerPlayerId = null
+            };
+
+            if (CanPlayerBreakHillDefenseWithinTurns(continuedState, playerId, remainingTurns - 1))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool DoesStateBreakHillDefense(
+        KingOfTheHillGameState state,
+        string playerId)
+    {
+        var objectiveHolder = state.FindUnitAt(HexCoordinate.Origin);
+        if (objectiveHolder is null)
+        {
+            return true;
+        }
+
+        if (string.Equals(objectiveHolder.OwnerPlayerId, playerId, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        var attackerAdjacentStrength = GetAdjacentStrength(state, playerId);
+        var defenderTotalHillDefense = GetTotalHillDefense(state, objectiveHolder);
+
+        return attackerAdjacentStrength > defenderTotalHillDefense;
+    }
+
+    private static int GetAdjacentStrength(
+        KingOfTheHillGameState state,
+        string playerId) =>
+        state.Units
+            .Where(unit =>
+                string.Equals(unit.OwnerPlayerId, playerId, StringComparison.OrdinalIgnoreCase) &&
+                state.Board.AreAdjacent(unit.Position, HexCoordinate.Origin))
             .Sum(unit => unit.Strength);
 
-        return remainingStrength > defenderStrength;
+    private static int GetTotalHillDefense(
+        KingOfTheHillGameState state,
+        KingOfTheHillUnitState objectiveHolder)
+    {
+        var adjacentSupport = state.Units
+            .Where(unit =>
+                string.Equals(unit.OwnerPlayerId, objectiveHolder.OwnerPlayerId, StringComparison.OrdinalIgnoreCase) &&
+                unit.Id != objectiveHolder.Id &&
+                state.Board.AreAdjacent(unit.Position, HexCoordinate.Origin))
+            .Sum(unit => unit.Strength);
+
+        return objectiveHolder.Strength + adjacentSupport;
     }
 
     private static KingOfTheHillGameState ApplyObjectiveSiegePressure(
@@ -393,20 +459,8 @@ internal static class KingOfTheHillGameRules
             return state;
         }
 
-        var adjacentPressure = state.Units
-            .Where(unit =>
-                string.Equals(unit.OwnerPlayerId, state.CurrentPlayerId, StringComparison.OrdinalIgnoreCase) &&
-                state.Board.AreAdjacent(unit.Position, HexCoordinate.Origin))
-            .Sum(unit => unit.Strength);
-
-        var defenderAdjacentSupport = state.Units
-            .Where(unit =>
-                string.Equals(unit.OwnerPlayerId, defender.OwnerPlayerId, StringComparison.OrdinalIgnoreCase) &&
-                unit.Id != defender.Id &&
-                state.Board.AreAdjacent(unit.Position, HexCoordinate.Origin))
-            .Sum(unit => unit.Strength);
-
-        var totalDefense = defender.Strength + defenderAdjacentSupport;
+        var adjacentPressure = GetAdjacentStrength(state, state.CurrentPlayerId);
+        var totalDefense = GetTotalHillDefense(state, defender);
 
         if (adjacentPressure <= totalDefense)
         {

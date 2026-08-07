@@ -49,8 +49,8 @@ Structure:
 The AI currently recognizes these internal match phases:
 
 - `Opening`
-  - `TurnNumber <= 4`
-  - and `Objective` is still empty
+  - `Objective` is still empty
+  - and there is no non-defender block in `r1` with `S >= 3`
 - `Midgame`
   - after the opening
   - and either `Objective` is still empty
@@ -69,6 +69,7 @@ Rule order still matters first.
 
 Current families:
 
+- `Opening`
 - `Objective`
 - `Siege`
 - `Defender`
@@ -81,6 +82,7 @@ Applied phase bias table:
 
 | Family | Opening | Midgame | Endgame |
 | --- | ---: | ---: | ---: |
+| `Opening` | `+14000` | `-4000` | `-10000` |
 | `Objective` | `0` | `+6000` | `+14000` |
 | `Siege` | `-4000` | `+8000` | `+6000` |
 | `Defender` | `+12000` | `0` | `-8000` |
@@ -93,7 +95,8 @@ Interpretation:
 
 - `Opening`
   - defenders are strongly favored
-  - siege and merge are softened so the AI does not rush inward too early
+  - opening-specific merge construction is favored
+  - siege and generic merge are softened so the AI does not rush inward too early
 - `Midgame`
   - siege becomes the main strategic push
   - merge and tactical pressure gain value
@@ -133,13 +136,30 @@ Typical intent:
 
 - save the unit instead of losing it on the hill
 
-### `KH-040` Preserve solo objective holder
-
-Special case: if the AI has exactly one unit and it already holds `Objective`, prefer `pass`.
-
 ### `KH-050` Keep holding Objective
 
-Choose any accepted move or pass that preserves occupation of `Objective` when the hold is not clearly lost.
+Choose any accepted move that preserves occupation of `Objective` when the hold is not clearly lost.
+
+### `KH-073` Threat-neutralizing merge
+
+If a threatened friendly unit can be saved by merging another friendly block into it, and the resulting merged block can no longer be eliminated on the next turn, prefer that merge before retreating.
+
+Typical intent:
+
+- preserve threatened material without conceding ground
+- prefer higher resulting `S`
+- at equal `S`, prefer the merge that leaves the block closer to the center
+- strongly reward merges that turn defense into a local counter-threat
+
+### `KH-075` Critical survival retreat
+
+If a strong unit (`S3+`) is under immediate or next-turn elimination threat, prefer a move by that same unit that reduces the threat instead of advancing other lines.
+
+Typical intent:
+
+- preserve valuable strength before it is traded away
+- prevent offensive tempo from outranking basic survival
+- apply even when the unit is no longer an active defender
 
 ### `KH-055` IA4 defender reset
 
@@ -190,6 +210,16 @@ Typical intent:
 - activate stronger distant blocks
 - reduce time-to-center
 
+### `KH-082` Threatened defender retreat
+
+If a named defender identity (`T`, `V`, `X`) is still on or near its `r2` lane and is threatened by a stronger adjacent enemy, prefer an outward or lateral retreat that lowers the threat.
+
+Typical intent:
+
+- stop a defender from walking inward while already under direct pressure
+- preserve the lane piece until it can either recover or lose the defender role cleanly
+- act as a defender-specific fallback behind `KH-075`
+
 ### `KH-085` Defender intercept
 
 If an active defender has a legal kill from `r2` into an adjacent enemy standing on `r1`, take it immediately.
@@ -209,6 +239,27 @@ Typical intent:
 - stop flank pieces before they merge into an inward block
 - deny easy early access from `r3` into the inner approach
 - preserve the defensive corridor before falling back to generic siege rules
+
+### `KH-091` Opening direct merge
+
+During `Opening`, if a safe merge is already available now, execute it before spending another turn only preparing a future merge.
+
+Typical intent:
+
+- convert an existing `S2 + S1` or similar structure into real siege mass immediately
+- prefer a finished outer or mid-ring block over another quiet setup step
+- avoid wasting opening tempo when the stronger block can already be formed
+
+### `KH-092` Opening merge setup
+
+During `Opening`, prefer quiet positioning moves that create a one-turn future merge between non-defender blocks, especially when that future merge will form a stronger block closer to the center.
+
+Typical intent:
+
+- avoid empty fallback drifting in the first turns
+- prepare `S3` or `S4` blocks before the real siege begins
+- favor the highest future `S`
+- at equal future `S`, favor the merge that finishes on the better radius
 
 ### `KH-090` Objective siege search
 
@@ -240,6 +291,10 @@ This rule favors inward approaches that:
 
 This rule was added to improve siege buildup on larger boards.
 
+Additional restriction:
+
+- if the same outer unit has a nearby merge that would consolidate it into a useful `S4+` siege block, that consolidation is preferred and the weak solo approach is suppressed
+
 ### `KH-120` Objective siege merge
 
 Choose a merge that improves siege capacity against an enemy on `Objective`.
@@ -248,6 +303,7 @@ Typical intent:
 
 - increase contest strength
 - create a future breakthrough block
+- consolidate distant material into `S4+` before feeding isolated weak units into the inner rings
 
 This rule now includes an excessive-merge penalty so the AI is less likely to over-merge when the added strength is not actually useful.
 
@@ -341,13 +397,13 @@ Currently the configured probability is `0` for all present profiles, so this ru
 
 Fallback to the highest preview-ranked command when no earlier labeled rule claims the turn.
 
-### `KH-900` No legal move fallback
+### `KH-899` Emergency no-move fallback
 
 Emergency fallback if no legal move exists.
 
 Current behavior:
 
-- choose `pass`
+- use `pass` only because no non-pass legal move exists for the AI
 
 ## Important Notes
 

@@ -16,7 +16,14 @@ public sealed record AutomatedDecisionTelemetry(
     int LeafEvaluations,
     int ChosenCommandScore,
     double ElapsedMilliseconds,
+    double GenerationMilliseconds,
+    double PreviewMilliseconds,
+    double PreviewExecutionMilliseconds,
+    double PreviewBaseEvaluationMilliseconds,
+    double PreviewImmediateBiasMilliseconds,
+    double SelectionMilliseconds,
     bool TimeBudgetReached,
     string ChosenCommandDescription,
     string DecisionRuleCode,
-    string DecisionRuleName);
+    string DecisionRuleName,
+    string? DecisionDiagnostics);

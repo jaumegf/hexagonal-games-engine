@@ -113,12 +113,15 @@ These tests verify the current end-of-match logic:
 
 - the match does not end at a fixed score target
 - the match ends only when the score leader still holds `Objective`
-- and the trailing player can no longer exceed the strength currently holding `Objective`
+- and the trailing player no longer has a realistic break line against the current hill defense
+- hill defense means the unit on `Objective` plus adjacent friendly support in `r1`
+- the engine now uses a short optimistic search instead of a raw total-strength comparison
 
 Typical examples:
 
 - `Execute_ScoreLeadDoesNotEndMatch_WhenTrailingPlayerStillHasEnoughStrengthToRetakeObjective`
 - `Execute_ScoreLeadEndsMatch_WhenTrailingPlayerLacksEnoughStrengthToRetakeObjective`
+- `Execute_SealedHillEndsMatch_EvenWhenTrailingPlayerStillHasHigherTotalStrength`
 
 This is one of the most important recent rule changes.
 

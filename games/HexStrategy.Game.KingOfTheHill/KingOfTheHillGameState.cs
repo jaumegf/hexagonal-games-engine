@@ -15,7 +15,7 @@ public sealed record KingOfTheHillGameState(
     bool IsCompleted,
     string? WinnerPlayerId) : ITurnBasedGameState
 {
-    public const int MaximumBlockStrength = 4;
+    public const int MaximumBlockStrength = 3;
 
     public string GameDefinitionId => KingOfTheHillGameDefinition.GameDefinitionId;
 
@@ -54,11 +54,11 @@ public sealed record KingOfTheHillGameState(
             KingOfTheHillUnitState.CreateSingle("1Q", "P1", new HexCoordinate(2, 4)),
             KingOfTheHillUnitState.CreateSingle("1R", "P1", new HexCoordinate(-5, 3)),
             KingOfTheHillUnitState.CreateSingle("1S", "P1", new HexCoordinate(3, 3)),
-            KingOfTheHillUnitState.CreateSeededBlock("1T", "P1", new HexCoordinate(1, -2), 3),
+            KingOfTheHillUnitState.CreateDefender("1T", "P1", new HexCoordinate(1, -2)),
             KingOfTheHillUnitState.CreateSingle("1U", "P1", new HexCoordinate(3, 2)),
-            KingOfTheHillUnitState.CreateSeededBlock("1V", "P1", new HexCoordinate(-1, -1), 3),
+            KingOfTheHillUnitState.CreateDefender("1V", "P1", new HexCoordinate(-1, -1)),
             KingOfTheHillUnitState.CreateSingle("1W", "P1", new HexCoordinate(-6, 2)),
-            KingOfTheHillUnitState.CreateSeededBlock("1X", "P1", new HexCoordinate(2, -1), 3),
+            KingOfTheHillUnitState.CreateDefender("1X", "P1", new HexCoordinate(2, -1)),
             KingOfTheHillUnitState.CreateSingle("2B", "P2", new HexCoordinate(1, -4)),
             KingOfTheHillUnitState.CreateSingle("2C", "P2", new HexCoordinate(0, -4)),
             KingOfTheHillUnitState.CreateSingle("2D", "P2", new HexCoordinate(-1, -4)),
@@ -77,11 +77,11 @@ public sealed record KingOfTheHillGameState(
             KingOfTheHillUnitState.CreateSingle("2Q", "P2", new HexCoordinate(-2, -4)),
             KingOfTheHillUnitState.CreateSingle("2R", "P2", new HexCoordinate(5, -3)),
             KingOfTheHillUnitState.CreateSingle("2S", "P2", new HexCoordinate(-2, -3)),
-            KingOfTheHillUnitState.CreateSeededBlock("2T", "P2", new HexCoordinate(-1, 2), 3),
+            KingOfTheHillUnitState.CreateDefender("2T", "P2", new HexCoordinate(-1, 2)),
             KingOfTheHillUnitState.CreateSingle("2U", "P2", new HexCoordinate(-3, -2)),
-            KingOfTheHillUnitState.CreateSeededBlock("2V", "P2", new HexCoordinate(1, 1), 3),
+            KingOfTheHillUnitState.CreateDefender("2V", "P2", new HexCoordinate(1, 1)),
             KingOfTheHillUnitState.CreateSingle("2W", "P2", new HexCoordinate(6, -2)),
-            KingOfTheHillUnitState.CreateSeededBlock("2X", "P2", new HexCoordinate(-2, 1), 3)
+            KingOfTheHillUnitState.CreateDefender("2X", "P2", new HexCoordinate(-2, 1))
         };
 
         return new KingOfTheHillGameState(
@@ -111,8 +111,7 @@ public sealed record KingOfTheHillGameState(
     public bool IsOccupied(HexCoordinate coordinate) =>
         FindUnitAt(coordinate) is not null;
 
-    public bool IsDefenderRetired(string unitId) =>
-        RetiredDefenderIds.Any(existingId => string.Equals(existingId, unitId, StringComparison.OrdinalIgnoreCase));
+    public bool IsDefenderRetired(string unitId) => false;
 
     private static IReadOnlyList<HexCoordinate> CreateBoardCoordinates() =>
         CreateCoordinatesFromRows(

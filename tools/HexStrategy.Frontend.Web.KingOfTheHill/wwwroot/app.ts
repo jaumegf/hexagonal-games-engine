@@ -26,10 +26,17 @@ type AutomatedDecisionTelemetry = {
   leafEvaluations: number;
   chosenCommandScore: number;
   elapsedMilliseconds: number;
+  generationMilliseconds: number;
+  previewMilliseconds: number;
+  previewExecutionMilliseconds: number;
+  previewBaseEvaluationMilliseconds: number;
+  previewImmediateBiasMilliseconds: number;
+  selectionMilliseconds: number;
   timeBudgetReached: boolean;
   chosenCommandDescription: string;
   decisionRuleCode: string;
   decisionRuleName: string;
+  decisionDiagnostics: string | null;
 };
 type KingOfTheHillState = {
   gameDefinitionId: string;
@@ -85,6 +92,8 @@ type HighlightKind =
   | "objective"
   | "objective-attack"
   | "objective-blocked";
+
+type UnitRole = "single" | "double" | "defender" | "attacker";
 
 declare global {
   interface Window {
@@ -186,7 +195,6 @@ class KingOfTheHillClient {
 class CanvasBoardRenderer {
   private readonly context: CanvasRenderingContext2D;
   private readonly radius = 45;
-  private readonly origin = { x: 506, y: 0 };
   private readonly tilePalette = {
     neutralFill: "#f9f4ea",
     neutralStroke: "#7b664e",
@@ -413,7 +421,9 @@ class CanvasBoardRenderer {
       if (
         hoveredUnit !== null &&
         hoveredUnit.ownerPlayerId === selectedUnit.ownerPlayerId &&
-        mergedStrength <= 4
+        !this.isDefenderUnit(selectedUnit) &&
+        !this.isDefenderUnit(hoveredUnit) &&
+        mergedStrength <= 3
       ) {
         const hoveredCenter = this.hexCenters.get(this.key(activeHoveredCoordinate));
         if (hoveredCenter) {
@@ -628,12 +638,16 @@ class CanvasBoardRenderer {
   ): void {
     const ctx = this.context;
 
-    const maxBarAreaWidth = this.radius * 1.1;
     const strength = Math.max(1, unit.strength);
-    const gap = strength <= 5 ? 4 : strength <= 8 ? 3 : 2;
-    const computedBarWidth = Math.min(4, Math.max(1.5, (maxBarAreaWidth - gap * (strength - 1)) / strength));
-    const badgeWidth = Math.min(this.radius * 1.28, strength * computedBarWidth + gap * (strength - 1) + 16);
-    const badgeHeight = this.radius * 0.68;
+    const dotRadius = Math.min(this.radius * 0.12, 4.8);
+    const gridColumns = Math.min(2, strength);
+    const gridRows = Math.ceil(strength / 2);
+    const columnGap = dotRadius * 1.35;
+    const rowGap = dotRadius * 1.2;
+    const dotGridWidth = gridColumns * dotRadius * 2 + Math.max(0, gridColumns - 1) * columnGap;
+    const dotGridHeight = gridRows * dotRadius * 2 + Math.max(0, gridRows - 1) * rowGap;
+    const badgeWidth = Math.max(this.radius * 0.8, dotGridWidth + 18);
+    const badgeHeight = Math.max(this.radius * 0.68, dotGridHeight + 14);
     const badgeX = center.x - badgeWidth / 2;
     const badgeY = center.y - badgeHeight / 2;
     const badgeRadius = Math.min(7, badgeHeight / 3.2);
@@ -650,24 +664,40 @@ class CanvasBoardRenderer {
       : "rgba(255, 249, 238, 0.18)";
     ctx.fill();
 
-    const totalBarsWidth = strength * computedBarWidth + gap * (strength - 1);
-    let currentX = center.x - totalBarsWidth / 2 + computedBarWidth / 2;
-    const barTop = center.y - badgeHeight * 0.24;
-    const barBottom = center.y + badgeHeight * 0.24;
-
-    ctx.strokeStyle = unitColor;
-    ctx.lineWidth = computedBarWidth;
-    ctx.lineCap = "round";
-
     for (let index = 0; index < strength; index += 1) {
-      ctx.beginPath();
-      ctx.moveTo(currentX, barTop);
-      ctx.lineTo(currentX, barBottom);
-      ctx.stroke();
-      currentX += computedBarWidth + gap;
-    }
+      let currentX: number;
+      let currentY: number;
 
-    ctx.lineCap = "butt";
+      if (strength === 3) {
+        if (index === 0) {
+          currentX = center.x;
+          currentY = center.y - (dotRadius + rowGap / 2);
+        } else {
+          const bottomRowWidth = dotRadius * 4 + columnGap;
+          currentX = center.x - bottomRowWidth / 2 + dotRadius + (index - 1) * (dotRadius * 2 + columnGap);
+          currentY = center.y + (dotRadius + rowGap / 2);
+        }
+      } else {
+        const columnIndex = index % 2;
+        const rowIndex = Math.floor(index / 2);
+        const dotsInRow = rowIndex === gridRows - 1 && strength % 2 === 1 && gridColumns === 2 ? 1 : gridColumns;
+        const rowWidth = dotsInRow * dotRadius * 2 + Math.max(0, dotsInRow - 1) * columnGap;
+        currentX = center.x - rowWidth / 2 + dotRadius + columnIndex * (dotRadius * 2 + columnGap);
+        currentY = center.y - dotGridHeight / 2 + dotRadius + rowIndex * (dotRadius * 2 + rowGap);
+      }
+
+      ctx.beginPath();
+      ctx.arc(currentX, currentY, dotRadius, 0, Math.PI * 2);
+      ctx.fillStyle = unitColor;
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.arc(currentX - dotRadius * 0.22, currentY - dotRadius * 0.24, dotRadius * 0.42, 0, Math.PI * 2);
+      ctx.fillStyle = unitAccent;
+      ctx.globalAlpha = 0.72;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
 
     if (isSelected) {
       const arrowCount = unit.strength === 1 ? 2 : 1;
@@ -694,6 +724,39 @@ class CanvasBoardRenderer {
 
   private isDefenderUnit(unit: Unit): boolean {
     return unit.id.endsWith("T") || unit.id.endsWith("V") || unit.id.endsWith("X");
+  }
+
+  private getUnitRole(unit: Unit): UnitRole {
+    if (this.isDefenderUnit(unit)) {
+      return "defender";
+    }
+
+    if (unit.strength === 1) {
+      return "single";
+    }
+
+    if (unit.strength === 2) {
+      return "double";
+    }
+
+    return "attacker";
+  }
+
+  private canRoleOccupyCoordinate(unit: Unit, coordinate: Coordinate): boolean {
+    const ring = this.hexDistance(coordinate, { q: 0, r: 0 });
+    const role = this.getUnitRole(unit);
+
+    switch (role) {
+      case "single":
+        return true;
+      case "double":
+        return ring >= 1;
+      case "defender":
+      case "attacker":
+        return ring >= 2;
+      default:
+        return false;
+    }
   }
 
   private drawMovementArrow(
@@ -788,7 +851,7 @@ class CanvasBoardRenderer {
       return 0;
     }
 
-    return strength * 1.6 + (strength - 1) * spacing;
+    return strength * 4 + (strength - 1) * spacing;
   }
 
   private drawBarGroup(
@@ -800,23 +863,29 @@ class CanvasBoardRenderer {
   ): number {
     const ctx = this.context;
     let currentX = startX;
-    const barWidth = 1.6;
+    const dotRadius = 2;
 
     ctx.save();
-    ctx.strokeStyle = "#5d5145";
-    ctx.lineWidth = barWidth;
-    ctx.lineCap = "round";
+    ctx.fillStyle = "#8b7355";
 
     for (let index = 0; index < strength; index += 1) {
       ctx.beginPath();
-      ctx.moveTo(currentX, centerY - barHeight / 2);
-      ctx.lineTo(currentX, centerY + barHeight / 2);
-      ctx.stroke();
-      currentX += barWidth + spacing;
+      ctx.arc(currentX + dotRadius, centerY, dotRadius, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.arc(currentX + dotRadius - 0.45, centerY - 0.45, dotRadius * 0.42, 0, Math.PI * 2);
+      ctx.fillStyle = "#d9c4a4";
+      ctx.globalAlpha = 0.7;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = "#8b7355";
+
+      currentX += dotRadius * 2 + spacing;
     }
 
     ctx.restore();
-    return currentX - spacing - barWidth;
+    return currentX - spacing;
   }
 
   private drawPreviewOperator(
@@ -954,7 +1023,16 @@ class CanvasBoardRenderer {
 
     const rowSpacing = this.radius * 1.5;
     const columnSpacing = this.radius * Math.sqrt(3);
-    const verticalCenter = this.canvas.height / 2 - this.radius * 0.22;
+    const projectedColumns = coordinates.map(coordinate => coordinate.q + coordinate.r / 2);
+    const minProjectedColumn = Math.min(...projectedColumns);
+    const maxProjectedColumn = Math.max(...projectedColumns);
+    const projectedColumnCenter = (minProjectedColumn + maxProjectedColumn) / 2;
+    const rowValues = rows.map(row => row.r);
+    const minRow = Math.min(...rowValues);
+    const maxRow = Math.max(...rowValues);
+    const rowCenter = (minRow + maxRow) / 2;
+    const horizontalCenter = this.canvas.width / 2;
+    const verticalCenter = this.canvas.height / 2 - this.radius * 0.12;
 
     return rows.map((row) => {
       return {
@@ -963,8 +1041,8 @@ class CanvasBoardRenderer {
           coordinate,
           x: coordinate.q + coordinate.r / 2,
           center: {
-            x: this.origin.x + (coordinate.q + coordinate.r / 2) * columnSpacing,
-            y: verticalCenter + coordinate.r * rowSpacing
+            x: horizontalCenter + ((coordinate.q + coordinate.r / 2) - projectedColumnCenter) * columnSpacing,
+            y: verticalCenter + (coordinate.r - rowCenter) * rowSpacing
           }
         }))
       };
@@ -1052,7 +1130,13 @@ class CanvasBoardRenderer {
       return false;
     }
 
-    if (!this.hasTraversablePath(state, selectedUnit, coordinate)) {
+    const movementDepth = getMovementDepthForTarget(selectedUnit, coordinate);
+
+    if (!this.hasTraversablePath(state, selectedUnit, coordinate, movementDepth)) {
+      return false;
+    }
+
+    if (!this.canRoleOccupyCoordinate(selectedUnit, coordinate)) {
       return false;
     }
 
@@ -1066,7 +1150,11 @@ class CanvasBoardRenderer {
     }
 
     if (occupyingUnit.ownerPlayerId === selectedUnit.ownerPlayerId) {
-      return true;
+      if (this.isDefenderUnit(selectedUnit) || this.isDefenderUnit(occupyingUnit)) {
+        return false;
+      }
+
+      return selectedUnit.strength + occupyingUnit.strength <= 3;
     }
 
     return selectedUnit.strength > occupyingUnit.strength;
@@ -1257,10 +1345,9 @@ class CanvasBoardRenderer {
   private hasTraversablePath(
     state: KingOfTheHillState,
     movingUnit: Unit,
-    target: Coordinate
+    target: Coordinate,
+    maxDepth: number
   ): boolean {
-    const maxDepth = getMovementDepth(movingUnit);
-
     if (maxDepth <= 0) {
       return false;
     }
@@ -1485,9 +1572,7 @@ function render(): void {
   const boardMatch = transientBoardState === null
     ? currentMatch
     : { ...currentMatch, state: transientBoardState };
-  const objectiveSiegePulse = isSiegeResolutionText(transientResolutionText)
-    ? getSiegePulseValue()
-    : 0;
+  const objectiveSiegePulse = 0;
   const effectiveSelectedUnit = transientSelectedUnit ?? selectedUnit;
 
   renderer.render(boardMatch, effectiveSelectedUnit, renderMode, hoveredCoordinate, objectiveSiegePulse);
@@ -1508,13 +1593,9 @@ function render(): void {
       !isAutomationPaused &&
       !isResolutionPlaybackActive &&
       !currentMatch.state.isCompleted);
-  const currentSiegeSummary =
-    transientBoardHint === null
-      ? getCurrentObjectiveSiegeSummary(currentMatch.state)
-      : null;
   boardHint.classList.toggle("hidden", !shouldShowBoardHint);
   boardHint.classList.toggle("board-hint-resolution", transientBoardHint !== null);
-  boardHint.classList.toggle("board-hint-siege", currentSiegeSummary !== null);
+  boardHint.classList.remove("board-hint-siege");
   const isMoveHint =
     transientBoardHint === null &&
     selectedUnit !== null &&
@@ -1525,7 +1606,7 @@ function render(): void {
   boardHint.classList.toggle("board-hint-move-p2", isMoveHint && currentMatch.state.currentPlayerId === "P2");
   boardHint.textContent = transientBoardHint ?? getBoardHintText(currentMatch.state, transientSelectedUnit ?? selectedUnit);
   resolutionBanner.classList.toggle("hidden", transientResolutionText === null);
-  resolutionBanner.classList.toggle("resolution-banner-siege", isSiegeResolutionText(transientResolutionText));
+  resolutionBanner.classList.remove("resolution-banner-siege");
   resolutionBanner.textContent = transientResolutionText ?? "";
   const canClearSelection = selectedUnit !== null && !humanTurnLocked;
   clearSelectionButton.classList.toggle("hidden", !canClearSelection);
@@ -1540,100 +1621,12 @@ function render(): void {
   undoStopButton.disabled = isAutomationPaused ? !canResumeMatch : !hasRewindSnapshot;
   refreshSavedMatchButtons();
   renderWinnerModal(currentMatch);
-  syncSiegeAnimationLoop();
 }
 
 function getBoardHintText(state: KingOfTheHillState, unit: SelectedUnit): string {
-  const siegeSummary = getCurrentObjectiveSiegeSummary(state);
-  if (siegeSummary) {
-    return siegeSummary;
-  }
-
   return unit === null
     ? "Click one of your units"
     : "Click an available hex to move";
-}
-
-function getCurrentObjectiveSiegeSummary(state: KingOfTheHillState): string | null {
-  const defender = state.units.find(unit =>
-    unit.position.q === state.objectiveCoordinate.q &&
-    unit.position.r === state.objectiveCoordinate.r &&
-    unit.ownerPlayerId !== state.currentPlayerId);
-
-  if (!defender) {
-    return null;
-  }
-
-  const adjacentPressure = state.units
-    .filter(unit =>
-      unit.ownerPlayerId === state.currentPlayerId &&
-      areAdjacent(unit.position, state.objectiveCoordinate))
-    .reduce((total, current) => total + current.strength, 0);
-
-  const defenderAdjacentSupport = state.units
-    .filter(unit =>
-      unit.ownerPlayerId === defender.ownerPlayerId &&
-      unit.id !== defender.id &&
-      areAdjacent(unit.position, state.objectiveCoordinate))
-    .reduce((total, current) => total + current.strength, 0);
-
-  const totalDefense = defender.strength + defenderAdjacentSupport;
-
-  if (adjacentPressure <= totalDefense) {
-    return null;
-  }
-
-  return defender.strength === 1
-    ? `Siege ready: ${defender.id} on the Hill will fall at end turn.`
-    : `Siege ready: ${defender.id} on the Hill will lose 1S at end turn.`;
-}
-
-function isSiegeResolutionText(value: string | null): boolean {
-  if (!value) {
-    return false;
-  }
-
-  const normalized = value.toLowerCase();
-  return normalized.includes("siege pressure");
-}
-
-function getSiegePulseValue(): number {
-  const phase = (Date.now() % 900) / 900;
-  return (Math.sin(phase * Math.PI * 2) + 1) / 2;
-}
-
-function syncSiegeAnimationLoop(): void {
-  const shouldAnimate =
-    currentMatch !== null &&
-    isResolutionPlaybackActive &&
-    isSiegeResolutionText(transientResolutionText);
-
-  if (shouldAnimate) {
-    if (siegeAnimationFrameHandle === null) {
-      const step = (): void => {
-        siegeAnimationFrameHandle = null;
-
-        if (
-          currentMatch === null ||
-          !isResolutionPlaybackActive ||
-          !isSiegeResolutionText(transientResolutionText)
-        ) {
-          return;
-        }
-
-        render();
-      };
-
-      siegeAnimationFrameHandle = window.requestAnimationFrame(step);
-    }
-
-    return;
-  }
-
-  if (siegeAnimationFrameHandle !== null) {
-    window.cancelAnimationFrame(siegeAnimationFrameHandle);
-    siegeAnimationFrameHandle = null;
-  }
 }
 
 function areAdjacent(left: Coordinate, right: Coordinate): boolean {
@@ -1741,13 +1734,32 @@ function getMovementDepth(unit: Unit): number {
   return unit.strength === 1 ? 2 : 1;
 }
 
+function getMovementDepthForTarget(unit: Unit, coordinate: Coordinate): number {
+  if (unit.strength !== 1) {
+    return 1;
+  }
+
+  const sourceRing = hexDistance(unit.position, { q: 0, r: 0 });
+  const targetRing = hexDistance(coordinate, { q: 0, r: 0 });
+
+  return targetRing < sourceRing ? 1 : 2;
+}
+
+function hexDistance(a: Coordinate, b: Coordinate): number {
+  const deltaQ = Math.abs(a.q - b.q);
+  const deltaR = Math.abs(a.r - b.r);
+  const deltaS = Math.abs((-a.q - a.r) - (-b.q - b.r));
+
+  return Math.max(deltaQ, deltaR, deltaS);
+}
+
 function isWithinRawMovementRange(
   renderer: BoardRenderer,
   unit: Unit,
   coordinate: Coordinate
 ): boolean {
   return renderer
-    .getReachableCoordinates(unit.position, getMovementDepth(unit))
+    .getReachableCoordinates(unit.position, getMovementDepthForTarget(unit, coordinate))
     .some(target => target.q === coordinate.q && target.r === coordinate.r);
 }
 
@@ -1780,23 +1792,12 @@ function buildResolutionSteps(message: string): ResolutionStep[] {
     .filter(sentence => sentence.length > 0)
     .map(sentence => sentence.endsWith(".") ? sentence : `${sentence}.`);
 
-  return sentences.map(sentence => {
-    if (sentence.toLowerCase().startsWith("siege pressure")) {
-      return {
-        logText: sentence,
-        bannerText: sentence,
-        boardHintText: sentence,
-        boardState: null
-      };
-    }
-
-    return {
-      logText: sentence,
-      bannerText: sentence,
-      boardHintText: null,
-      boardState: null
-    };
-  });
+  return sentences.map(sentence => ({
+    logText: sentence,
+    bannerText: sentence,
+    boardHintText: null,
+    boardState: null
+  }));
 }
 
 function clearResolutionPlayback(): void {
@@ -1805,7 +1806,6 @@ function clearResolutionPlayback(): void {
   transientResolutionText = null;
   transientBoardState = null;
   transientSelectedUnit = null;
-  syncSiegeAnimationLoop();
 }
 
 function wait(milliseconds: number): Promise<void> {
@@ -2075,8 +2075,15 @@ function renderAiTelemetry(match: MatchResponse): void {
   aiTelemetryPanel.append(
     makeMetaRow("Last AI", `${telemetry.playerDisplayName} (${formatControllerType(telemetry.controllerType)})`),
     makeMetaRow("Rule", `${telemetry.decisionRuleCode} ${telemetry.decisionRuleName}`),
+    ...(telemetry.decisionDiagnostics ? [makeMetaRow("Compare", telemetry.decisionDiagnostics)] : []),
     makeMetaRow("Command", telemetry.chosenCommandDescription),
     makeMetaRow("Elapsed", `${telemetry.elapsedMilliseconds.toFixed(0)} ms`),
+    makeMetaRow("Generate", `${telemetry.generationMilliseconds.toFixed(0)} ms`),
+    makeMetaRow("Preview", `${telemetry.previewMilliseconds.toFixed(0)} ms`),
+    makeMetaRow("Preview Engine", `${telemetry.previewExecutionMilliseconds.toFixed(0)} ms`),
+    makeMetaRow("Preview Eval", `${telemetry.previewBaseEvaluationMilliseconds.toFixed(0)} ms`),
+    makeMetaRow("Preview Bias", `${telemetry.previewImmediateBiasMilliseconds.toFixed(0)} ms`),
+    makeMetaRow("Select", `${telemetry.selectionMilliseconds.toFixed(0)} ms`),
     makeMetaRow("Budget", `${telemetry.timeBudgetMilliseconds} ms`),
     makeMetaRow("Cutoff", telemetry.timeBudgetReached ? "Yes" : "No"),
     makeMetaRow("Depth", telemetry.searchDepth.toString()),
@@ -2354,7 +2361,11 @@ function pushAutomatedDecisionLog(telemetry: AutomatedDecisionTelemetry | null):
 
   pushLog(
     `${telemetry.playerDisplayName} (${formatControllerType(telemetry.controllerType)}) ` +
-    `[${telemetry.decisionRuleCode}] ${telemetry.decisionRuleName} -> ${telemetry.chosenCommandDescription}`);
+      `[${telemetry.decisionRuleCode}] ${telemetry.decisionRuleName} -> ${telemetry.chosenCommandDescription}`);
+
+  if (telemetry.decisionDiagnostics) {
+    pushLog(`Rule compare: ${telemetry.decisionDiagnostics}`);
+  }
 }
 
 function stringEqualsIgnoreCase(left: string, right: string): boolean {
@@ -2387,7 +2398,7 @@ function renderWinnerModal(match: MatchResponse): void {
   const modalKey = `${match.matchId}:${match.state.turnNumber}:${match.state.winnerPlayerId}:${match.state.controlScores.P1 ?? 0}:${match.state.controlScores.P2 ?? 0}`;
 
   winnerTitle.textContent = `${winnerName} wins`;
-  winnerMessage.textContent = `${winnerName} wins. The opponent can no longer exceed the strength on Objective.`;
+  winnerMessage.textContent = `${winnerName} captures the Hill and wins.`;
 
   if (!winnerModal.classList.contains("hidden") && winnerModalMatchKey === modalKey) {
     return;
@@ -2494,18 +2505,10 @@ canvas.addEventListener("click", async event => {
       return;
     }
 
-    const canAttemptFriendlyMerge =
-      selectedUnit &&
-      selectedUnit.id !== clickedUnit.id &&
-      isWithinRawMovementRange(renderer, selectedUnit, clickedUnit.position);
-
     if (
       selectedUnit &&
       selectedUnit.id !== clickedUnit.id &&
-      (
-        renderer.canMoveToCoordinate(currentMatch.state, selectedUnit, clickedUnit.position) ||
-        canAttemptFriendlyMerge
-      )
+      renderer.canMoveToCoordinate(currentMatch.state, selectedUnit, clickedUnit.position)
     ) {
       try {
         const previousState = cloneState(currentMatch.state);

@@ -49,6 +49,7 @@ internal sealed record KingOfTheHillAiConfiguration(
 
 internal enum DecisionFamily
 {
+    Opening,
     Objective,
     Siege,
     Defender,
@@ -71,25 +72,41 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
 
         var stopwatch = Stopwatch.StartNew();
         var instrumentation = new SearchInstrumentation();
-        var rankedEntries = KingOfTheHillAiMoveGenerator
-            .GenerateLegalCommands(state)
+        var phase = GetMatchPhase(state);
+        var generationStopwatch = Stopwatch.StartNew();
+        var legalCommands = KingOfTheHillAiMoveGenerator
+            .GenerateLegalCommands(state, evaluateVictory: false)
+            .ToArray();
+        generationStopwatch.Stop();
+        instrumentation.GenerationMilliseconds = generationStopwatch.Elapsed.TotalMilliseconds;
+
+        var previewStopwatch = Stopwatch.StartNew();
+        var rankedEntries = legalCommands
+            .Where(command => !string.Equals(command.Name, "pass", StringComparison.OrdinalIgnoreCase))
             .Select(command => new PreviewedCommand(
                 command,
-                PreviewCommandScore(state, command, state.CurrentPlayerId)))
+                PreviewCommandScore(state, command, state.CurrentPlayerId, phase, instrumentation)))
             .OrderByDescending(entry => entry.Score)
             .ThenBy(entry => entry.Command.Name, StringComparer.OrdinalIgnoreCase)
             .ThenBy(entry => FormatCommand(entry.Command), StringComparer.OrdinalIgnoreCase)
             .ToArray();
+        previewStopwatch.Stop();
+        instrumentation.PreviewMilliseconds = previewStopwatch.Elapsed.TotalMilliseconds;
 
         instrumentation.LegalCommandCount = rankedEntries.Length;
 
         if (rankedEntries.Length == 0)
         {
+            var emergencyPass = legalCommands.FirstOrDefault(command =>
+                string.Equals(command.Name, "pass", StringComparison.OrdinalIgnoreCase));
+
             stopwatch.Stop();
             return BuildDecisionResult(
                 state,
                 player,
-                new PreviewedCommand(new GameCommand("pass"), int.MinValue, "KH-900", "No legal move fallback"),
+                emergencyPass is not null
+                    ? new PreviewedCommand(emergencyPass, int.MinValue, "KH-899", "Emergency no-move fallback")
+                    : new PreviewedCommand(new GameCommand("pass"), int.MinValue, "KH-900", "No legal move fallback"),
                 stopwatch.Elapsed.TotalMilliseconds,
                 instrumentation);
         }
@@ -98,7 +115,10 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
         instrumentation.NodesVisited = rankedEntries.Length;
         instrumentation.LeafEvaluations = rankedEntries.Length;
 
+        var selectionStopwatch = Stopwatch.StartNew();
         var chosenCommand = ChooseRankedCommand(state, rankedEntries, instrumentation);
+        selectionStopwatch.Stop();
+        instrumentation.SelectionMilliseconds = selectionStopwatch.Elapsed.TotalMilliseconds;
         if (chosenCommand is null)
         {
             chosenCommand = rankedEntries[0];
@@ -363,6 +383,7 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
         {
             MatchPhase.Opening => family switch
             {
+                DecisionFamily.Opening => 14_000,
                 DecisionFamily.Defender => 12_000,
                 DecisionFamily.Siege => -4_000,
                 DecisionFamily.Merge => -2_000,
@@ -370,6 +391,7 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
             },
             MatchPhase.Midgame => family switch
             {
+                DecisionFamily.Opening => -4_000,
                 DecisionFamily.Objective => 6_000,
                 DecisionFamily.Siege => 8_000,
                 DecisionFamily.Merge => 4_000,
@@ -378,6 +400,7 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
             },
             MatchPhase.Endgame => family switch
             {
+                DecisionFamily.Opening => -10_000,
                 DecisionFamily.Objective => 14_000,
                 DecisionFamily.Siege => 6_000,
                 DecisionFamily.Defender => -8_000,
@@ -393,7 +416,61 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
         IReadOnlyList<PreviewedCommand> rankedEntries,
         SearchInstrumentation instrumentation)
     {
+        static ScoredCommand? SelectBestScored(
+            IEnumerable<ScoredCommand> candidates) =>
+            candidates
+                .Where(entry => entry.Score > 0)
+                .OrderByDescending(entry => entry.Score)
+                .ThenBy(entry => FormatCommand(entry.Command), StringComparer.OrdinalIgnoreCase)
+                .FirstOrDefault();
+
         rankedEntries = ApplyDefenderAdvanceRestrictions(state, rankedEntries);
+        rankedEntries = ApplySiegeStagingRestrictions(state, rankedEntries);
+        rankedEntries = ApplyObjectiveEntryRestrictions(state, rankedEntries);
+        var matchPhase = GetMatchPhase(state);
+        var ruleCandidates = new List<(PreviewedCommand Entry, int Priority)>();
+        var priority = 0;
+
+        void AddRuleCandidate(ScoredCommand? command, string code, string name, bool recordDiagnostic = false)
+        {
+            if (recordDiagnostic)
+            {
+                instrumentation.RecordRuleDiagnostic(code, command);
+            }
+
+            if (command is null)
+            {
+                return;
+            }
+
+            var rankedEntry = FindRankedEntry(rankedEntries, command.Command, code, name);
+            if (rankedEntry is null)
+            {
+                return;
+            }
+
+            ruleCandidates.Add((rankedEntry with
+            {
+                Score = command.Score,
+                DecisionRuleCode = code,
+                DecisionRuleName = name
+            }, priority++));
+        }
+
+        void AddPreviewedRuleCandidate(PreviewedCommand? entry, string code, string name, int scoreOverride)
+        {
+            if (entry is null)
+            {
+                return;
+            }
+
+            ruleCandidates.Add((entry with
+            {
+                Score = scoreOverride,
+                DecisionRuleCode = code,
+                DecisionRuleName = name
+            }, priority++));
+        }
 
         var currentObjectiveHolder = state.Units.SingleOrDefault(unit =>
             string.Equals(unit.OwnerPlayerId, state.CurrentPlayerId, StringComparison.OrdinalIgnoreCase) &&
@@ -401,71 +478,40 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
 
         if (currentObjectiveHolder is not null)
         {
-            var bestObjectiveReinforcementEntry = rankedEntries
-                .Select(entry => new ScoredCommand(
+            AddRuleCandidate(
+                SelectBestScored(rankedEntries.Select(entry => new ScoredCommand(
                     entry.Command,
                     ApplyPhaseBias(
                         state,
                         DecisionFamily.Objective,
-                        EvaluateObjectiveReinforcementScore(state, entry.Command, currentObjectiveHolder))))
-                .Where(entry => entry.Score > 0)
-                .OrderByDescending(entry => entry.Score)
-                .ThenBy(entry => FormatCommand(entry.Command), StringComparer.OrdinalIgnoreCase)
-                .FirstOrDefault();
+                        EvaluateObjectiveReinforcementScore(state, entry.Command, currentObjectiveHolder))))),
+                "KH-010",
+                "Objective reinforcement");
 
-            if (bestObjectiveReinforcementEntry is not null)
-            {
-                return FindRankedEntry(rankedEntries, bestObjectiveReinforcementEntry.Command, "KH-010", "Objective reinforcement");
-            }
-
-            var bestObjectiveSupportApproachEntry = rankedEntries
-                .Select(entry => new ScoredCommand(
+            AddRuleCandidate(
+                SelectBestScored(rankedEntries.Select(entry => new ScoredCommand(
                     entry.Command,
                     ApplyPhaseBias(
                         state,
                         DecisionFamily.Objective,
-                        EvaluateObjectiveSupportApproachScore(state, entry.Command, currentObjectiveHolder))))
-                .Where(entry => entry.Score > 0)
-                .OrderByDescending(entry => entry.Score)
-                .ThenBy(entry => FormatCommand(entry.Command), StringComparer.OrdinalIgnoreCase)
-                .FirstOrDefault();
+                        EvaluateObjectiveSupportApproachScore(state, entry.Command, currentObjectiveHolder))))),
+                "KH-020",
+                "Objective support approach");
 
-            if (bestObjectiveSupportApproachEntry is not null)
-            {
-                return FindRankedEntry(rankedEntries, bestObjectiveSupportApproachEntry.Command, "KH-020", "Objective support approach");
-            }
-
-            var bestObjectiveEmergencyRetreatEntry = rankedEntries
-                .Select(entry => new ScoredCommand(
+            AddRuleCandidate(
+                SelectBestScored(rankedEntries.Select(entry => new ScoredCommand(
                     entry.Command,
                     ApplyPhaseBias(
                         state,
                         DecisionFamily.Objective,
-                        EvaluateObjectiveEmergencyRetreatScore(state, entry.Command, currentObjectiveHolder))))
-                .Where(entry => entry.Score > 0)
-                .OrderByDescending(entry => entry.Score)
-                .ThenBy(entry => FormatCommand(entry.Command), StringComparer.OrdinalIgnoreCase)
-                .FirstOrDefault();
-
-            if (bestObjectiveEmergencyRetreatEntry is not null)
-            {
-                return FindRankedEntry(rankedEntries, bestObjectiveEmergencyRetreatEntry.Command, "KH-030", "Objective emergency retreat");
-            }
+                        EvaluateObjectiveEmergencyRetreatScore(state, entry.Command, currentObjectiveHolder))))),
+                "KH-030",
+                "Objective emergency retreat");
         }
 
         if (currentObjectiveHolder is not null &&
             !IsObjectiveHoldClearlyLost(state, currentObjectiveHolder))
         {
-            var friendlyUnitCount = state.Units.Count(unit =>
-                string.Equals(unit.OwnerPlayerId, state.CurrentPlayerId, StringComparison.OrdinalIgnoreCase));
-            var passEntry = rankedEntries.FirstOrDefault(entry =>
-                string.Equals(entry.Command.Name, "pass", StringComparison.OrdinalIgnoreCase));
-
-            if (friendlyUnitCount == 1 && passEntry is not null)
-            {
-                return passEntry with { DecisionRuleCode = "KH-040", DecisionRuleName = "Preserve solo objective holder" };
-            }
-
             var bestObjectiveHoldingEntry = rankedEntries.FirstOrDefault(entry =>
             {
                 var result = KingOfTheHillGameRules.Execute(state, entry.Command);
@@ -482,277 +528,262 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
 
             if (bestObjectiveHoldingEntry is not null)
             {
-                return bestObjectiveHoldingEntry with { DecisionRuleCode = "KH-050", DecisionRuleName = "Keep holding Objective" };
+                AddPreviewedRuleCandidate(
+                    bestObjectiveHoldingEntry,
+                    "KH-050",
+                    "Keep holding Objective",
+                    bestObjectiveHoldingEntry.Score + ApplyPhaseBias(state, DecisionFamily.Objective, 6_000));
             }
         }
 
-        if (GetMatchPhase(state) == MatchPhase.Endgame)
-        {
-            var bestObjectiveEntry = rankedEntries
-                .Select(entry => new ScoredCommand(
-                    entry.Command,
-                    ApplyPhaseBias(
-                        state,
-                        DecisionFamily.Objective,
-                        EvaluateObjectiveEntryTimingScore(state, entry.Command))))
-                .Where(entry => entry.Score > 0)
-                .OrderByDescending(entry => entry.Score)
-                .ThenBy(entry => FormatCommand(entry.Command), StringComparer.OrdinalIgnoreCase)
-                .FirstOrDefault();
-
-            if (bestObjectiveEntry is not null)
-            {
-                return FindRankedEntry(rankedEntries, bestObjectiveEntry.Command, "KH-065", "Objective entry timing");
-            }
-        }
-
-        var bestObjectiveOverrunSetup = rankedEntries
-            .Select(entry => new ScoredCommand(
-                entry.Command,
-                ApplyPhaseBias(
-                    state,
-                    DecisionFamily.Objective,
-                    EvaluateObjectiveOverrunSetupScore(state, entry.Command))))
-            .Where(entry => entry.Score > 0)
-            .OrderByDescending(entry => entry.Score)
-            .ThenBy(entry => FormatCommand(entry.Command), StringComparer.OrdinalIgnoreCase)
-            .FirstOrDefault();
-
-        if (bestObjectiveOverrunSetup is not null)
-        {
-            return FindRankedEntry(rankedEntries, bestObjectiveOverrunSetup.Command, "KH-070", "Objective assault posture");
-        }
-
-        if (Configuration.SearchDepth > 1)
-        {
-            var bestObjectiveReserveMobilization = rankedEntries
-                .Select(entry => new ScoredCommand(
-                    entry.Command,
-                    ApplyPhaseBias(
-                        state,
-                        DecisionFamily.Objective,
-                        EvaluateObjectiveReserveMobilizationScore(state, entry.Command))))
-                .Where(entry => entry.Score > 0)
-                .OrderByDescending(entry => entry.Score)
-                .ThenBy(entry => FormatCommand(entry.Command), StringComparer.OrdinalIgnoreCase)
-                .FirstOrDefault();
-
-            if (bestObjectiveReserveMobilization is not null)
-            {
-                return FindRankedEntry(rankedEntries, bestObjectiveReserveMobilization.Command, "KH-080", "Objective reserve mobilization");
-            }
-        }
-
-        var bestDefenderIntercept = rankedEntries
-            .Select(entry => new ScoredCommand(
-                entry.Command,
-                ApplyPhaseBias(
-                    state,
-                    DecisionFamily.Defender,
-                    EvaluateDefenderInterceptScore(state, entry.Command))))
-            .Where(entry => entry.Score > 0)
-            .OrderByDescending(entry => entry.Score)
-            .ThenBy(entry => FormatCommand(entry.Command), StringComparer.OrdinalIgnoreCase)
-            .FirstOrDefault();
-
-        if (bestDefenderIntercept is not null)
-        {
-            return FindRankedEntry(rankedEntries, bestDefenderIntercept.Command, "KH-085", "Defender intercept");
-        }
-
-        var bestDefenderLaneDenial = rankedEntries
-            .Select(entry => new ScoredCommand(
-                entry.Command,
-                ApplyPhaseBias(
-                    state,
-                    DecisionFamily.Defender,
-                    EvaluateDefenderLaneDenialScore(state, entry.Command))))
-            .Where(entry => entry.Score > 0)
-            .OrderByDescending(entry => entry.Score)
-            .ThenBy(entry => FormatCommand(entry.Command), StringComparer.OrdinalIgnoreCase)
-            .FirstOrDefault();
-
-        if (bestDefenderLaneDenial is not null)
-        {
-            return FindRankedEntry(rankedEntries, bestDefenderLaneDenial.Command, "KH-088", "Defender lane denial");
-        }
-
-        var bestSiegeSearchEntry = ChooseObjectiveSiegeSearchCommand(state, rankedEntries, instrumentation);
-        if (bestSiegeSearchEntry is not null)
-        {
-            return bestSiegeSearchEntry with { DecisionRuleCode = "KH-090", DecisionRuleName = "Objective siege search" };
-        }
-
-        var bestObjectiveBreakthroughApproach = rankedEntries
-            .Select(entry => new ScoredCommand(
-                entry.Command,
-                ApplyPhaseBias(
-                    state,
-                    DecisionFamily.Siege,
-                    EvaluateObjectiveBreakthroughApproachScore(state, entry.Command))))
-            .Where(entry => entry.Score > 0)
-            .OrderByDescending(entry => entry.Score)
-            .ThenBy(entry => FormatCommand(entry.Command), StringComparer.OrdinalIgnoreCase)
-            .FirstOrDefault();
-
-        if (bestObjectiveBreakthroughApproach is not null)
-        {
-            return FindRankedEntry(rankedEntries, bestObjectiveBreakthroughApproach.Command, "KH-100", "Objective breakthrough approach");
-        }
-
-        if (ControllerType == PlayerControllerType.IaLevel4)
-        {
-            var bestLevelFourSiegeApproach = rankedEntries
-                .Select(entry => new ScoredCommand(entry.Command, EvaluateLevelFourSiegeApproachScore(state, entry.Command)))
-                .Where(entry => entry.Score > 0)
-                .OrderByDescending(entry => entry.Score)
-                .ThenBy(entry => FormatCommand(entry.Command), StringComparer.OrdinalIgnoreCase)
-                .FirstOrDefault();
-
-            if (bestLevelFourSiegeApproach is not null)
-            {
-                return FindRankedEntry(rankedEntries, bestLevelFourSiegeApproach.Command, "KH-110", "IA4 strong siege approach");
-            }
-        }
-
-        var bestObjectiveSiegeMerge = rankedEntries
-            .Select(entry => new ScoredCommand(
-                entry.Command,
-                ApplyPhaseBias(
-                    state,
-                    DecisionFamily.Siege,
-                    EvaluateObjectiveSiegeMergeScore(state, entry.Command))))
-            .Where(entry => entry.Score > 0)
-            .OrderByDescending(entry => entry.Score)
-            .ThenBy(entry => FormatCommand(entry.Command), StringComparer.OrdinalIgnoreCase)
-            .FirstOrDefault();
-
-        if (bestObjectiveSiegeMerge is not null)
-        {
-            return FindRankedEntry(rankedEntries, bestObjectiveSiegeMerge.Command, "KH-120", "Objective siege merge");
-        }
-
-        var bestObjectiveSiegeApproach = rankedEntries
-            .Select(entry => new ScoredCommand(
-                entry.Command,
-                ApplyPhaseBias(
-                    state,
-                    DecisionFamily.Siege,
-                    EvaluateObjectiveSiegeApproachScore(state, entry.Command))))
-            .Where(entry => entry.Score > 0)
-            .OrderByDescending(entry => entry.Score)
-            .ThenBy(entry => FormatCommand(entry.Command), StringComparer.OrdinalIgnoreCase)
-            .FirstOrDefault();
-
-        if (bestObjectiveSiegeApproach is not null)
-        {
-            return FindRankedEntry(rankedEntries, bestObjectiveSiegeApproach.Command, "KH-130", "Objective siege approach");
-        }
-
-        if (ControllerType == PlayerControllerType.IaLevel4)
-        {
-            var bestDefenderReset = rankedEntries
-                .Select(entry => new ScoredCommand(
-                    entry.Command,
-                    ApplyPhaseBias(
-                        state,
-                        DecisionFamily.Defender,
-                        EvaluateDefenderResetScore(state, entry.Command))))
-                .Where(entry => entry.Score > 0)
-                .OrderByDescending(entry => entry.Score)
-                .ThenBy(entry => FormatCommand(entry.Command), StringComparer.OrdinalIgnoreCase)
-                .FirstOrDefault();
-
-            if (bestDefenderReset is not null)
-            {
-                return FindRankedEntry(rankedEntries, bestDefenderReset.Command, "KH-055", "IA4 defender reset");
-            }
-        }
-
-        var bestSurvivalRetreat = rankedEntries
-            .Select(entry => new ScoredCommand(
+        AddRuleCandidate(
+            SelectBestScored(rankedEntries.Select(entry => new ScoredCommand(
                 entry.Command,
                 ApplyPhaseBias(
                     state,
                     DecisionFamily.Survival,
-                    EvaluateSurvivalRetreatScore(state, entry.Command))))
-            .Where(entry => entry.Score > 0)
-            .OrderByDescending(entry => entry.Score)
-            .ThenBy(entry => FormatCommand(entry.Command), StringComparer.OrdinalIgnoreCase)
-            .FirstOrDefault();
+                    EvaluateThreatNeutralizingMergeScore(state, entry.Command))))),
+            "KH-073",
+            "Threat-neutralizing merge");
 
-        if (bestSurvivalRetreat is not null)
+        AddRuleCandidate(
+            SelectBestScored(rankedEntries.Select(entry => new ScoredCommand(
+                entry.Command,
+                ApplyPhaseBias(
+                    state,
+                    DecisionFamily.Survival,
+                    EvaluateCriticalSurvivalRetreatScore(state, entry.Command))))),
+            "KH-075",
+            "Critical survival retreat");
+
+        if (matchPhase == MatchPhase.Endgame)
         {
-            return FindRankedEntry(rankedEntries, bestSurvivalRetreat.Command, "KH-140", "Survival retreat");
+            AddRuleCandidate(
+                SelectBestScored(rankedEntries.Select(entry => new ScoredCommand(
+                    entry.Command,
+                    ApplyPhaseBias(
+                        state,
+                        DecisionFamily.Objective,
+                        EvaluateObjectiveEntryTimingScore(state, entry.Command))))),
+                "KH-065",
+                "Objective entry timing");
         }
 
-        var bestInnerKill = rankedEntries
-            .Select(entry => new ScoredCommand(
+        if (matchPhase != MatchPhase.Opening)
+        {
+            AddRuleCandidate(
+                SelectBestScored(rankedEntries.Select(entry => new ScoredCommand(
+                    entry.Command,
+                    ApplyPhaseBias(
+                        state,
+                        DecisionFamily.Objective,
+                        EvaluateObjectiveOverrunSetupScore(state, entry.Command))))),
+                "KH-070",
+                "Objective assault posture");
+        }
+
+        AddRuleCandidate(
+            SelectBestScored(rankedEntries.Select(entry => new ScoredCommand(
+                entry.Command,
+                ApplyPhaseBias(
+                    state,
+                    DecisionFamily.Defender,
+                    EvaluateThreatenedDefenderRetreatScore(state, entry.Command))))),
+            "KH-082",
+            "Threatened defender retreat");
+
+        if (matchPhase != MatchPhase.Opening && Configuration.SearchDepth > 1)
+        {
+            AddRuleCandidate(
+                SelectBestScored(rankedEntries.Select(entry => new ScoredCommand(
+                    entry.Command,
+                    ApplyPhaseBias(
+                        state,
+                        DecisionFamily.Objective,
+                        EvaluateObjectiveReserveMobilizationScore(state, entry.Command))))),
+                "KH-080",
+                "Objective reserve mobilization");
+        }
+
+        AddRuleCandidate(
+            SelectBestScored(rankedEntries.Select(entry => new ScoredCommand(
+                entry.Command,
+                ApplyPhaseBias(
+                    state,
+                    DecisionFamily.Defender,
+                    EvaluateDefenderInterceptScore(state, entry.Command))))),
+            "KH-085",
+            "Defender intercept");
+
+        AddRuleCandidate(
+            SelectBestScored(rankedEntries.Select(entry => new ScoredCommand(
+                entry.Command,
+                ApplyPhaseBias(
+                    state,
+                    DecisionFamily.Defender,
+                    EvaluateDefenderLaneDenialScore(state, entry.Command))))),
+            "KH-088",
+            "Defender lane denial");
+
+        AddRuleCandidate(
+            SelectBestScored(rankedEntries.Select(entry => new ScoredCommand(
+                entry.Command,
+                ApplyPhaseBias(
+                    state,
+                    DecisionFamily.Opening,
+                    EvaluateOpeningDirectMergeScore(state, entry.Command))))),
+            "KH-091",
+            "Opening direct merge");
+
+        AddRuleCandidate(
+            SelectBestScored(rankedEntries.Select(entry => new ScoredCommand(
+                entry.Command,
+                ApplyPhaseBias(
+                    state,
+                    DecisionFamily.Opening,
+                    EvaluateOpeningMergeSetupScore(state, entry.Command))))),
+            "KH-092",
+            "Opening merge setup");
+
+        if (matchPhase != MatchPhase.Opening)
+        {
+            var bestSiegeSearchEntry = ChooseObjectiveSiegeSearchCommand(state, rankedEntries, instrumentation);
+            if (bestSiegeSearchEntry is not null)
+            {
+                AddPreviewedRuleCandidate(
+                    bestSiegeSearchEntry,
+                    "KH-090",
+                    "Objective siege search",
+                    bestSiegeSearchEntry.Score);
+            }
+
+            AddRuleCandidate(
+                SelectBestScored(rankedEntries.Select(entry => new ScoredCommand(
+                    entry.Command,
+                    ApplyPhaseBias(
+                        state,
+                        DecisionFamily.Siege,
+                        EvaluateObjectiveBreakthroughApproachScore(state, entry.Command))))),
+                "KH-100",
+                "Objective breakthrough approach");
+
+            if (ControllerType == PlayerControllerType.IaLevel4)
+            {
+                AddRuleCandidate(
+                    SelectBestScored(rankedEntries.Select(entry =>
+                        new ScoredCommand(entry.Command, EvaluateLevelFourSiegeApproachScore(state, entry.Command)))),
+                    "KH-110",
+                    "IA4 strong siege approach");
+            }
+
+            AddRuleCandidate(
+                SelectBestScored(rankedEntries.Select(entry => new ScoredCommand(
+                    entry.Command,
+                    ApplyPhaseBias(
+                        state,
+                        DecisionFamily.Siege,
+                        EvaluateObjectiveSiegeMergeScore(state, entry.Command))))),
+                "KH-120",
+                "Objective siege merge");
+
+            AddRuleCandidate(
+                SelectBestScored(rankedEntries.Select(entry => new ScoredCommand(
+                    entry.Command,
+                    ApplyPhaseBias(
+                        state,
+                        DecisionFamily.Siege,
+                        EvaluateObjectiveSiegeApproachScore(state, entry.Command))))),
+                "KH-130",
+                "Objective siege approach");
+        }
+
+        if (ControllerType == PlayerControllerType.IaLevel4)
+        {
+            AddRuleCandidate(
+                SelectBestScored(rankedEntries.Select(entry => new ScoredCommand(
+                    entry.Command,
+                    ApplyPhaseBias(
+                        state,
+                        DecisionFamily.Defender,
+                        EvaluateDefenderResetScore(state, entry.Command))))),
+                "KH-055",
+                "IA4 defender reset");
+        }
+
+        AddRuleCandidate(
+            SelectBestScored(rankedEntries.Select(entry => new ScoredCommand(
+                entry.Command,
+                ApplyPhaseBias(
+                    state,
+                    DecisionFamily.Survival,
+                    EvaluateSurvivalRetreatScore(state, entry.Command))))),
+            "KH-140",
+            "Survival retreat");
+
+        AddRuleCandidate(
+            SelectBestScored(rankedEntries.Select(entry => new ScoredCommand(
                 entry.Command,
                 ApplyPhaseBias(
                     state,
                     DecisionFamily.Tactical,
-                    EvaluateKillSelectionScore(state, entry.Command, innerOrSameRing: true))))
-            .Where(entry => entry.Score > 0)
-            .OrderByDescending(entry => entry.Score)
-            .ThenBy(entry => FormatCommand(entry.Command), StringComparer.OrdinalIgnoreCase)
-            .FirstOrDefault();
+                    EvaluateImmediateLocalKillScore(state, entry.Command))))),
+            "KH-145",
+            "Immediate local kill",
+            recordDiagnostic: true);
 
-        if (bestInnerKill is not null)
-        {
-            return FindRankedEntry(rankedEntries, bestInnerKill.Command, "KH-150", "Inner-ring kill");
-        }
-
-        var bestForcedInnerThreat = rankedEntries
-            .Select(entry => new ScoredCommand(
+        AddRuleCandidate(
+            SelectBestScored(rankedEntries.Select(entry => new ScoredCommand(
                 entry.Command,
                 ApplyPhaseBias(
                     state,
                     DecisionFamily.Tactical,
-                    EvaluateForcedInnerThreatScore(state, entry.Command))))
-            .Where(entry => entry.Score > 0)
-            .OrderByDescending(entry => entry.Score)
-            .ThenBy(entry => FormatCommand(entry.Command), StringComparer.OrdinalIgnoreCase)
-            .FirstOrDefault();
+                    EvaluateKillSelectionScore(state, entry.Command, innerOrSameRing: true))))),
+            "KH-150",
+            "Inner-ring kill",
+            recordDiagnostic: true);
 
-        if (bestForcedInnerThreat is not null)
-        {
-            return FindRankedEntry(rankedEntries, bestForcedInnerThreat.Command, "KH-160", "Forced inner threat");
-        }
+        AddRuleCandidate(
+            SelectBestScored(rankedEntries.Select(entry => new ScoredCommand(
+                entry.Command,
+                ApplyPhaseBias(
+                    state,
+                    DecisionFamily.Tactical,
+                    EvaluateForcedInnerThreatScore(state, entry.Command))))),
+            "KH-160",
+            "Forced inner threat",
+            recordDiagnostic: true);
 
-        var bestDefensiveMerge = rankedEntries
-            .Select(entry => new ScoredCommand(
+        AddRuleCandidate(
+            SelectBestScored(rankedEntries.Select(entry => new ScoredCommand(
                 entry.Command,
                 ApplyPhaseBias(
                     state,
                     DecisionFamily.Merge,
-                    EvaluateDefensiveMergeScore(state, entry.Command))))
-            .Where(entry => entry.Score > 0)
-            .OrderByDescending(entry => entry.Score)
-            .ThenBy(entry => FormatCommand(entry.Command), StringComparer.OrdinalIgnoreCase)
-            .FirstOrDefault();
+                    EvaluateDefensiveMergeScore(state, entry.Command))))),
+            "KH-170",
+            "Defensive merge",
+            recordDiagnostic: true);
 
-        if (bestDefensiveMerge is not null)
-        {
-            return FindRankedEntry(rankedEntries, bestDefensiveMerge.Command, "KH-170", "Defensive merge");
-        }
-
-        var bestOuterSafeKill = rankedEntries
-            .Select(entry => new ScoredCommand(
+        AddRuleCandidate(
+            SelectBestScored(rankedEntries.Select(entry => new ScoredCommand(
                 entry.Command,
                 ApplyPhaseBias(
                     state,
                     DecisionFamily.Tactical,
-                    EvaluateKillSelectionScore(state, entry.Command, innerOrSameRing: false))))
-            .Where(entry => entry.Score > 0)
-            .OrderByDescending(entry => entry.Score)
-            .ThenBy(entry => FormatCommand(entry.Command), StringComparer.OrdinalIgnoreCase)
-            .FirstOrDefault();
+                    EvaluateKillSelectionScore(state, entry.Command, innerOrSameRing: false))))),
+            "KH-180",
+            "Outer safe kill");
 
-        if (bestOuterSafeKill is not null)
-        {
-            return FindRankedEntry(rankedEntries, bestOuterSafeKill.Command, "KH-180", "Outer safe kill");
-        }
+        AddRuleCandidate(
+            SelectBestScored(rankedEntries.Select(entry => new ScoredCommand(
+                entry.Command,
+                ApplyPhaseBias(
+                    state,
+                    DecisionFamily.Fallback,
+                    EvaluateStrategicAdvanceScore(state, entry.Command))))),
+            "KH-215",
+            "Strategic advance",
+            recordDiagnostic: true);
 
         var bestDistanceOneMerge = rankedEntries
             .FirstOrDefault(entry => EvaluateMergeOpportunity(state, entry.Command) == MergeOpportunity.DistanceOneFavorable);
@@ -761,7 +792,11 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
             Configuration.DistanceOneMergeProbability > 0 &&
             Random.Shared.NextDouble() < Configuration.DistanceOneMergeProbability)
         {
-            return bestDistanceOneMerge with { DecisionRuleCode = "KH-190", DecisionRuleName = "Distance-1 favorable merge" };
+            AddPreviewedRuleCandidate(
+                bestDistanceOneMerge,
+                "KH-190",
+                "Distance-1 favorable merge",
+                ApplyPhaseBias(state, DecisionFamily.Merge, 18_000));
         }
 
         var bestDistanceTwoMerge = rankedEntries
@@ -771,7 +806,22 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
             Configuration.DistanceTwoMergeProbability > 0 &&
             Random.Shared.NextDouble() < Configuration.DistanceTwoMergeProbability)
         {
-            return bestDistanceTwoMerge with { DecisionRuleCode = "KH-200", DecisionRuleName = "Distance-2 favorable merge" };
+            AddPreviewedRuleCandidate(
+                bestDistanceTwoMerge,
+                "KH-200",
+                "Distance-2 favorable merge",
+                ApplyPhaseBias(state, DecisionFamily.Merge, 10_000));
+        }
+
+        var bestRuleCandidate = ruleCandidates
+            .OrderByDescending(candidate => candidate.Entry.Score)
+            .ThenBy(candidate => candidate.Priority)
+            .Select(candidate => candidate.Entry)
+            .FirstOrDefault();
+
+        if (bestRuleCandidate is not null)
+        {
+            return bestRuleCandidate;
         }
 
         return rankedEntries[0] with { DecisionRuleCode = "KH-220", DecisionRuleName = "Ranked fallback" };
@@ -846,10 +896,10 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
         }
 
         var rankedCommands = KingOfTheHillAiMoveGenerator
-            .GenerateLegalCommands(state)
+            .GenerateLegalCommands(state, evaluateVictory: false)
             .Select(command => new PreviewedCommand(
                 command,
-                PreviewCommandScore(state, command, maximizingPlayerId)))
+                PreviewCommandScore(state, command, maximizingPlayerId, GetMatchPhase(state), instrumentation)))
             .OrderByDescending(entry => entry.Score)
             .ThenBy(entry => entry.Command.Name, StringComparer.OrdinalIgnoreCase)
             .ThenBy(entry => FormatCommand(entry.Command), StringComparer.OrdinalIgnoreCase)
@@ -936,16 +986,285 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
     private static int PreviewCommandScore(
         KingOfTheHillGameState state,
         GameCommand command,
-        string maximizingPlayerId)
+        string maximizingPlayerId,
+        MatchPhase phase,
+        SearchInstrumentation instrumentation)
     {
-        var result = KingOfTheHillGameRules.Execute(state, command);
+        var executionStopwatch = Stopwatch.StartNew();
+        var result = KingOfTheHillGameRules.Preview(state, command);
+        executionStopwatch.Stop();
+        instrumentation.PreviewExecutionMilliseconds += executionStopwatch.Elapsed.TotalMilliseconds;
+
         if (!result.Accepted)
         {
             return int.MinValue;
         }
 
         var nextState = (KingOfTheHillGameState)result.State;
-        return Evaluate(nextState, maximizingPlayerId) + EvaluateImmediateCommandBias(state, nextState, command);
+        var baseEvaluationStopwatch = Stopwatch.StartNew();
+        var baseScore = EvaluateStrategicPreview(nextState, maximizingPlayerId, phase);
+        baseEvaluationStopwatch.Stop();
+        instrumentation.PreviewBaseEvaluationMilliseconds += baseEvaluationStopwatch.Elapsed.TotalMilliseconds;
+
+        var immediateBiasStopwatch = Stopwatch.StartNew();
+        var immediateBias = phase == MatchPhase.Opening
+            ? EvaluateOpeningImmediateCommandBias(state, nextState, command)
+            : EvaluateImmediateCommandBias(state, nextState, command);
+        immediateBiasStopwatch.Stop();
+        instrumentation.PreviewImmediateBiasMilliseconds += immediateBiasStopwatch.Elapsed.TotalMilliseconds;
+
+        return baseScore + immediateBias;
+    }
+
+    private static int EvaluateStrategicPreview(
+        KingOfTheHillGameState state,
+        string maximizingPlayerId,
+        MatchPhase phase)
+    {
+        return phase == MatchPhase.Opening
+            ? EvaluateOpeningPreview(state, maximizingPlayerId)
+            : EvaluateMidgamePreview(state, maximizingPlayerId);
+    }
+
+    private static int EvaluateOpeningPreview(
+        KingOfTheHillGameState state,
+        string maximizingPlayerId)
+    {
+        var minimizingPlayerId = state.Players.Single(player => player.Id != maximizingPlayerId).Id;
+        var maximizingUnits = state.Units
+            .Where(unit => string.Equals(unit.OwnerPlayerId, maximizingPlayerId, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        var minimizingUnits = state.Units
+            .Where(unit => string.Equals(unit.OwnerPlayerId, minimizingPlayerId, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+
+        static int EvaluateOpeningSide(
+            KingOfTheHillGameState state,
+            IReadOnlyCollection<KingOfTheHillUnitState> friendlyUnits,
+            string playerId)
+        {
+            var score = 0;
+
+            foreach (var unit in friendlyUnits)
+            {
+                var distanceToCenter = unit.Position.DistanceTo(HexCoordinate.Origin);
+                var distanceScore = (state.Board.Radius + 2 - distanceToCenter) * 180;
+                var materialScore = unit.Strength * 520;
+                var immediateThreatPenalty = GetImmediateThreatStrength(state, unit) * 900;
+
+                score += distanceScore + materialScore - immediateThreatPenalty;
+
+                if (state.Board.AreAdjacent(unit.Position, HexCoordinate.Origin))
+                {
+                    score += 1_600 + unit.Strength * 180;
+                }
+                else if (distanceToCenter == 2)
+                {
+                    score += 900 + unit.Strength * 120;
+                }
+
+                if (unit.Strength >= 3)
+                {
+                    score += 1_800;
+                }
+
+                if (unit.Strength >= 4)
+                {
+                    score += 2_400;
+                }
+
+                if (IsDefenderUnit(state, unit, playerId))
+                {
+                    if (!state.IsDefenderRetired(unit.Id))
+                    {
+                        score += unit.Position.DistanceTo(HexCoordinate.Origin) == 2 ? 3_000 : 1_000;
+                    }
+                    else
+                    {
+                        score += Math.Max(0, 3 - distanceToCenter) * 700;
+                    }
+                }
+            }
+
+            score += friendlyUnits.Count(unit => unit.Strength >= 3) * 1_800;
+            score += friendlyUnits.Count(unit => unit.Position.DistanceTo(HexCoordinate.Origin) <= 2) * 500;
+            return score;
+        }
+
+        return EvaluateOpeningSide(state, maximizingUnits, maximizingPlayerId) -
+               EvaluateOpeningSide(state, minimizingUnits, minimizingPlayerId);
+    }
+
+    private static int EvaluateMidgamePreview(
+        KingOfTheHillGameState state,
+        string maximizingPlayerId)
+    {
+        var minimizingPlayerId = state.Players.Single(player => player.Id != maximizingPlayerId).Id;
+        return EvaluateMidgamePreviewSide(state, maximizingPlayerId) -
+               EvaluateMidgamePreviewSide(state, minimizingPlayerId);
+    }
+
+    private static int EvaluateMidgamePreviewSide(
+        KingOfTheHillGameState state,
+        string playerId)
+    {
+        var friendlyUnits = state.Units
+            .Where(unit => string.Equals(unit.OwnerPlayerId, playerId, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        var enemyUnits = state.Units
+            .Where(unit => !string.Equals(unit.OwnerPlayerId, playerId, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+
+        var score = 0;
+        var unitOnObjective = friendlyUnits.SingleOrDefault(unit => unit.Position == HexCoordinate.Origin);
+        var enemyOnObjective = enemyUnits.SingleOrDefault(unit => unit.Position == HexCoordinate.Origin);
+        var adjacentFriendlyStrength = friendlyUnits
+            .Where(unit => state.Board.AreAdjacent(unit.Position, HexCoordinate.Origin))
+            .Sum(unit => unit.Strength);
+        var adjacentEnemyStrength = enemyUnits
+            .Where(unit => state.Board.AreAdjacent(unit.Position, HexCoordinate.Origin))
+            .Sum(unit => unit.Strength);
+
+        score += (state.ControlScores[playerId] * 9_000);
+        score += friendlyUnits.Sum(unit => unit.Strength) * 340;
+        score += friendlyUnits.Count(unit => unit.Strength >= 3) * 1_200;
+        score += friendlyUnits.Count(unit => unit.Position.DistanceTo(HexCoordinate.Origin) <= 2) * 900;
+        score += friendlyUnits.Count(unit => unit.Position.DistanceTo(HexCoordinate.Origin) <= 3) * 300;
+        score += adjacentFriendlyStrength * 1_800;
+        score -= adjacentEnemyStrength * 1_000;
+
+        foreach (var unit in friendlyUnits)
+        {
+            var distanceToCenter = unit.Position.DistanceTo(HexCoordinate.Origin);
+            score += (state.Board.Radius + 2 - distanceToCenter) * 160;
+            score += unit.Strength * 420;
+            score -= GetImmediateThreatStrength(state, unit) * 700;
+
+            if (distanceToCenter == 1)
+            {
+                score += 2_800 + unit.Strength * 260;
+            }
+            else if (distanceToCenter == 2)
+            {
+                score += 1_100 + unit.Strength * 120;
+            }
+
+            if (IsDefenderUnit(state, unit, playerId))
+            {
+                if (!state.IsDefenderRetired(unit.Id))
+                {
+                    score += distanceToCenter == 2 ? 1_800 : 400;
+                }
+                else if (distanceToCenter <= 2)
+                {
+                    score += 900;
+                }
+            }
+        }
+
+        if (unitOnObjective is not null)
+        {
+            score += 18_000 + unitOnObjective.Strength * 4_000;
+            score += adjacentFriendlyStrength * 2_200;
+            score -= adjacentEnemyStrength * 2_000;
+        }
+
+        if (enemyOnObjective is not null)
+        {
+            score -= 20_000 + enemyOnObjective.Strength * 4_200;
+            score += friendlyUnits.Count(unit => unit.Position.DistanceTo(HexCoordinate.Origin) == 1) * 2_400;
+            score += friendlyUnits.Count(unit => unit.Position.DistanceTo(HexCoordinate.Origin) == 2) * 1_100;
+            score += adjacentFriendlyStrength * 1_600;
+        }
+
+        return score;
+    }
+
+    private static int EvaluateOpeningImmediateCommandBias(
+        KingOfTheHillGameState previousState,
+        KingOfTheHillGameState nextState,
+        GameCommand command)
+    {
+        if (!string.Equals(command.Name, "move", StringComparison.OrdinalIgnoreCase))
+        {
+            return EvaluatePassBias(previousState, command);
+        }
+
+        if (!TryGetMoveContext(previousState, nextState, command, previousState.CurrentPlayerId, out var sourceUnit, out var movedUnit))
+        {
+            return 0;
+        }
+
+        var classification = ClassifyCommand(previousState, command);
+        var sourceDistance = sourceUnit.Position.DistanceTo(HexCoordinate.Origin);
+        var targetDistance = movedUnit.Position.DistanceTo(HexCoordinate.Origin);
+
+        var score = classification switch
+        {
+            CandidateClassification.Objective => 10_000,
+            CandidateClassification.KillInnerOrSameRing => 20_000,
+            CandidateClassification.KillOuterSafe => 8_000,
+            CandidateClassification.MergeTowardObjective => 16_000,
+            CandidateClassification.Merge => 8_000,
+            _ => 0
+        };
+
+        if (targetDistance < sourceDistance)
+        {
+            score += (sourceDistance - targetDistance) * 4_000;
+        }
+        else if (targetDistance > sourceDistance)
+        {
+            score -= (targetDistance - sourceDistance) * 3_000;
+        }
+
+        score += movedUnit.Strength * 1_400;
+
+        if (targetDistance == 1)
+        {
+            score += 6_000;
+        }
+        else if (targetDistance == 2)
+        {
+            score += 2_500;
+        }
+
+        if (classification is CandidateClassification.Merge or CandidateClassification.MergeTowardObjective)
+        {
+            score += movedUnit.Strength switch
+            {
+                >= 4 => 10_000,
+                3 => 6_000,
+                _ => 2_000
+            };
+        }
+
+        if (classification is CandidateClassification.KillInnerOrSameRing or CandidateClassification.KillOuterSafe)
+        {
+            score += 4_000;
+        }
+
+        if (IsDefenderUnit(previousState, sourceUnit, previousState.CurrentPlayerId))
+        {
+            if (!previousState.IsDefenderRetired(sourceUnit.Id))
+            {
+                if (sourceDistance == 2 && targetDistance == 2)
+                {
+                    score += 7_000;
+                }
+                else if (targetDistance < 2)
+                {
+                    score -= 10_000;
+                }
+            }
+            else if (targetDistance <= sourceDistance)
+            {
+                score += 2_500;
+            }
+        }
+
+        score -= GetImmediateThreatStrength(nextState, movedUnit) * 1_800;
+        return score;
     }
 
     private static int EstimateMobility(KingOfTheHillGameState state, KingOfTheHillUnitState unit)
@@ -1333,15 +1652,81 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
         var targetDistance = movedUnit.Position.DistanceTo(HexCoordinate.Origin);
         if (sourceDistance == 1 && targetDistance == 1)
         {
-            if (HasAdjacentEnemyStrengthAtLeast(nextState, movedUnit, 4))
-            {
-                return 0;
-            }
-
-            return 120_000 + movedUnit.Strength * 2_000;
+            var score = 120_000 + movedUnit.Strength * 2_000;
+            score -= EvaluateImmediateRecapturePenalty(nextState, movedUnit, sourceDistance, targetDistance);
+            return Math.Max(0, score);
         }
 
         return EvaluateKillCommandBias(state, nextState, command, state.CurrentPlayerId, innerOrSameRing);
+    }
+
+    private static int EvaluateImmediateLocalKillScore(
+        KingOfTheHillGameState state,
+        GameCommand command)
+    {
+        if (!string.Equals(command.Name, "move", StringComparison.OrdinalIgnoreCase) ||
+            command.Arguments is null ||
+            !command.Arguments.TryGetValue("q", out var qValue) ||
+            !command.Arguments.TryGetValue("r", out var rValue) ||
+            !int.TryParse(qValue, out var q) ||
+            !int.TryParse(rValue, out var r))
+        {
+            return 0;
+        }
+
+        var sourceUnit = state.FindUnit(command.GetRequiredArgument("unitId"));
+        if (sourceUnit is null)
+        {
+            return 0;
+        }
+
+        var target = new HexCoordinate(q, r);
+        var targetUnit = state.FindUnitAt(target);
+        if (targetUnit is null ||
+            string.Equals(targetUnit.OwnerPlayerId, sourceUnit.OwnerPlayerId, StringComparison.OrdinalIgnoreCase) ||
+            sourceUnit.Strength <= targetUnit.Strength)
+        {
+            return 0;
+        }
+
+        var sourceDistance = sourceUnit.Position.DistanceTo(HexCoordinate.Origin);
+        var targetDistance = target.DistanceTo(HexCoordinate.Origin);
+        if (targetDistance > 2)
+        {
+            return 0;
+        }
+
+        var result = KingOfTheHillGameRules.Execute(state, command);
+        if (!result.Accepted)
+        {
+            return 0;
+        }
+
+        var nextState = (KingOfTheHillGameState)result.State;
+        var movedUnit = nextState.FindUnitAt(target);
+        if (movedUnit is null ||
+            !string.Equals(movedUnit.OwnerPlayerId, sourceUnit.OwnerPlayerId, StringComparison.OrdinalIgnoreCase))
+        {
+            return 0;
+        }
+
+        var score = 132_000;
+        score += (3 - targetDistance) * 12_000;
+        score += targetUnit.Strength * 7_000;
+        score += movedUnit.Strength * 4_000;
+
+        if (targetDistance <= sourceDistance)
+        {
+            score += 10_000;
+        }
+
+        if (targetDistance == 1)
+        {
+            score += 8_000;
+        }
+
+        score -= EvaluateImmediateRecapturePenalty(nextState, movedUnit, sourceDistance, targetDistance);
+        return Math.Max(0, score);
     }
 
     private static int EvaluateMergeCommandBias(
@@ -1446,13 +1831,38 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
             return 0;
         }
 
+        var hasThreatenedStrongUnit = state.Units.Any(unit =>
+            IsThreatenedStrongUnit(state, unit, state.CurrentPlayerId));
+
+        if (hasThreatenedStrongUnit)
+        {
+            return -95_000;
+        }
+
+        var hasThreatenedDefenderOnRingTwo = state.Units.Any(unit =>
+            IsThreatenedDefenderIdentityOnRingTwo(state, unit, state.CurrentPlayerId));
+
+        if (hasThreatenedDefenderOnRingTwo)
+        {
+            return -40_000;
+        }
+
+        var passResult = KingOfTheHillGameRules.Execute(state, command);
+        if (passResult.Accepted &&
+            passResult.State is KingOfTheHillGameState passState &&
+            passState.IsCompleted &&
+            string.Equals(passState.WinnerPlayerId, state.CurrentPlayerId, StringComparison.OrdinalIgnoreCase))
+        {
+            return 160_000;
+        }
+
         var currentPlayerUnitOnObjective = state.Units.SingleOrDefault(unit =>
             unit.OwnerPlayerId == state.CurrentPlayerId &&
             unit.Position == HexCoordinate.Origin);
 
         if (currentPlayerUnitOnObjective is null)
         {
-            return -7_500;
+            return -120_000;
         }
 
         var friendlyUnitCount = state.Units.Count(unit => unit.OwnerPlayerId == state.CurrentPlayerId);
@@ -1461,7 +1871,92 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
             return friendlyUnitCount == 1 ? 48_000 : 18_000;
         }
 
-        return 2_000;
+        return -80_000;
+    }
+
+    private static int EvaluateCriticalSurvivalRetreatScore(
+        KingOfTheHillGameState state,
+        GameCommand command)
+    {
+        if (!string.Equals(command.Name, "move", StringComparison.OrdinalIgnoreCase))
+        {
+            return 0;
+        }
+
+        var result = KingOfTheHillGameRules.Execute(state, command);
+        if (!result.Accepted)
+        {
+            return 0;
+        }
+
+        var nextState = (KingOfTheHillGameState)result.State;
+        if (!TryGetMoveContext(state, nextState, command, state.CurrentPlayerId, out var sourceUnit, out var movedUnit) ||
+            sourceUnit.Position == HexCoordinate.Origin ||
+            sourceUnit.Strength < 3)
+        {
+            return 0;
+        }
+
+        var sourceImmediateThreat = GetImmediateThreatStrength(state, sourceUnit);
+        var sourceThreat = GetNextTurnThreatStrength(state, sourceUnit);
+        if (sourceImmediateThreat == 0 && sourceThreat == 0)
+        {
+            return 0;
+        }
+
+        var sourceDistance = sourceUnit.Position.DistanceTo(HexCoordinate.Origin);
+        var targetDistance = movedUnit.Position.DistanceTo(HexCoordinate.Origin);
+        var targetImmediateThreat = GetImmediateThreatStrength(nextState, movedUnit);
+        var targetThreat = GetNextTurnThreatStrength(nextState, movedUnit);
+        if (targetImmediateThreat > sourceImmediateThreat ||
+            targetThreat > sourceThreat ||
+            (targetImmediateThreat == sourceImmediateThreat && targetThreat == sourceThreat))
+        {
+            return 0;
+        }
+
+        var score = 118_000;
+        score += (sourceImmediateThreat - targetImmediateThreat) * 12_000;
+        score += (sourceThreat - targetThreat) * 7_000;
+        score += sourceUnit.Strength * 5_000;
+
+        if (targetImmediateThreat == 0)
+        {
+            score += 22_000;
+        }
+        else if (targetImmediateThreat <= movedUnit.Strength)
+        {
+            score += 10_000;
+        }
+
+        if (targetThreat == 0)
+        {
+            score += 18_000;
+        }
+        else if (targetThreat <= movedUnit.Strength)
+        {
+            score += 9_000;
+        }
+
+        if (targetDistance < sourceDistance)
+        {
+            score += (sourceDistance - targetDistance) * 10_000;
+        }
+        else if (targetDistance == sourceDistance)
+        {
+            score += 8_000;
+        }
+        else if (targetDistance > sourceDistance)
+        {
+            score -= (targetDistance - sourceDistance) * 5_000;
+        }
+
+        if (sourceDistance <= 2)
+        {
+            score += 4_000;
+        }
+
+        return score;
     }
 
     private static int EvaluatePositionalCommandBias(
@@ -1692,8 +2187,8 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
         var alreadyHasWinningContestStrength = currentContestCapacity > enemyOnObjective.Strength;
         if (alreadyHasWinningContestStrength)
         {
-            var sourceDistance = sourceUnit.Position.DistanceTo(HexCoordinate.Origin);
-            var mergeImprovesArrival = targetDistance < sourceDistance && mergedUnit.Strength > enemyOnObjective.Strength;
+            var sourceRingDistance = sourceUnit.Position.DistanceTo(HexCoordinate.Origin);
+            var mergeImprovesArrival = targetDistance < sourceRingDistance && mergedUnit.Strength > enemyOnObjective.Strength;
             if (!mergeImprovesArrival)
             {
                 return 0;
@@ -1706,9 +2201,23 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
             return 0;
         }
 
+        var sourceDistance = sourceUnit.Position.DistanceTo(HexCoordinate.Origin);
+
         var score = 28_000;
         score += (nextContestCapacity - currentContestCapacity) * 8_000;
         score += mergedUnit.Strength * 2_800;
+
+        var createsSiegeMass = mergedUnit.Strength >= 4 && targetDistance is 2 or 3;
+        if (createsSiegeMass)
+        {
+            score += 24_000;
+            score += (sourceDistance - targetDistance) * 8_000;
+
+            if (CanThreatenObjectiveWithinTurns(nextState, mergedUnit, 3))
+            {
+                score += 18_000;
+            }
+        }
 
         if (mergedUnit.Strength > enemyOnObjective.Strength)
         {
@@ -1853,10 +2362,7 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
         KingOfTheHillGameState state,
         GameCommand command)
     {
-        if (GetMatchPhase(state) != MatchPhase.Endgame ||
-            ClassifyCommand(state, command) != CandidateClassification.Objective ||
-            ShouldSuppressDefenderObjectiveEntry(state, command) ||
-            !string.Equals(command.Name, "move", StringComparison.OrdinalIgnoreCase))
+        if (!IsStrategicObjectiveEntry(state, command, requireEndgamePhase: true))
         {
             return 0;
         }
@@ -1910,14 +2416,27 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
             .Sum(unit => unit.Strength);
 
         var immediateRecapturePenalty = EvaluateImmediateRecapturePenalty(nextState, objectiveHolder, sourceDistance, 0);
+        var immediateObjectiveKillThreat = GetImmediateThreatStrength(nextState, objectiveHolder);
         var cannotBeExceeded = opponentRemainingStrength <= objectiveHolder.Strength;
         var holdsInnerAdvantage = friendlyAdjacentStrength >= enemyAdjacentStrength;
         var dominatesInnerRing = friendlyAdjacentStrength > enemyAdjacentStrength;
+        var totalHillDefense = objectiveHolder.Strength + friendlyAdjacentStrength;
         var objectiveIsExposed = enemyAdjacentStrength >= objectiveHolder.Strength;
+        var losesHillToSiege = enemyAdjacentStrength > totalHillDefense;
 
         if (!cannotBeExceeded &&
             friendlyAdjacentStrength == 0 &&
             immediateRecapturePenalty > 0)
+        {
+            return 0;
+        }
+
+        if (!cannotBeExceeded && immediateObjectiveKillThreat > 0)
+        {
+            return 0;
+        }
+
+        if (!cannotBeExceeded && losesHillToSiege)
         {
             return 0;
         }
@@ -2003,6 +2522,13 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
             return 0;
         }
 
+        if (sourceUnit.Strength < 4 &&
+            (HasLocalSiegeStagingMergeAvailable(state, sourceUnit) ||
+             CanAnchorLocalSiegeStagingMerge(state, sourceUnit)))
+        {
+            return 0;
+        }
+
         var sourceDistance = sourceUnit.Position.DistanceTo(HexCoordinate.Origin);
         var targetDistance = movedUnit.Position.DistanceTo(HexCoordinate.Origin);
         if (targetDistance >= sourceDistance || targetDistance > 3)
@@ -2043,6 +2569,114 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
         return score;
     }
 
+    private static bool IsStrategicObjectiveEntry(
+        KingOfTheHillGameState state,
+        GameCommand command,
+        bool requireEndgamePhase)
+    {
+        if ((requireEndgamePhase && GetMatchPhase(state) != MatchPhase.Endgame) ||
+            ClassifyCommand(state, command) != CandidateClassification.Objective ||
+            ShouldSuppressDefenderObjectiveEntry(state, command) ||
+            !string.Equals(command.Name, "move", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var result = KingOfTheHillGameRules.Execute(state, command);
+        if (!result.Accepted)
+        {
+            return false;
+        }
+
+        var nextState = (KingOfTheHillGameState)result.State;
+        if (!TryGetMoveContext(state, nextState, command, state.CurrentPlayerId, out var sourceUnit, out _))
+        {
+            return false;
+        }
+
+        var objectiveHolder = nextState.FindUnitAt(HexCoordinate.Origin);
+        if (objectiveHolder is null ||
+            !string.Equals(objectiveHolder.OwnerPlayerId, state.CurrentPlayerId, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var currentPlayerId = state.CurrentPlayerId;
+        var opponentPlayerId = state.Players
+            .Select(player => player.Id)
+            .First(playerId => !string.Equals(playerId, currentPlayerId, StringComparison.OrdinalIgnoreCase));
+
+        if (sourceUnit.Strength == 1 &&
+            HasStrongerInwardApproachAvailable(state, sourceUnit.OwnerPlayerId, sourceUnit.Id))
+        {
+            return false;
+        }
+
+        var opponentRemainingStrength = nextState.Units
+            .Where(unit => string.Equals(unit.OwnerPlayerId, opponentPlayerId, StringComparison.OrdinalIgnoreCase))
+            .Sum(unit => unit.Strength);
+
+        var enemyAdjacentStrength = nextState.Units
+            .Where(unit =>
+                string.Equals(unit.OwnerPlayerId, opponentPlayerId, StringComparison.OrdinalIgnoreCase) &&
+                nextState.Board.AreAdjacent(unit.Position, HexCoordinate.Origin))
+            .Sum(unit => unit.Strength);
+
+        var friendlyAdjacentStrength = nextState.Units
+            .Where(unit =>
+                string.Equals(unit.OwnerPlayerId, currentPlayerId, StringComparison.OrdinalIgnoreCase) &&
+                unit.Id != objectiveHolder.Id &&
+                nextState.Board.AreAdjacent(unit.Position, HexCoordinate.Origin))
+            .Sum(unit => unit.Strength);
+
+        var immediateObjectiveKillThreat = GetImmediateThreatStrength(nextState, objectiveHolder);
+        var cannotBeExceeded = opponentRemainingStrength <= objectiveHolder.Strength;
+        var holdsInnerAdvantage = friendlyAdjacentStrength >= enemyAdjacentStrength;
+        var dominatesInnerRing = friendlyAdjacentStrength > enemyAdjacentStrength;
+        var totalHillDefense = objectiveHolder.Strength + friendlyAdjacentStrength;
+        var objectiveIsExposed = enemyAdjacentStrength >= objectiveHolder.Strength;
+        var losesHillToSiege = enemyAdjacentStrength > totalHillDefense;
+        var immediateRecapturePenalty = EvaluateImmediateRecapturePenalty(
+            nextState,
+            objectiveHolder,
+            sourceUnit.Position.DistanceTo(HexCoordinate.Origin),
+            0);
+
+        if (!cannotBeExceeded &&
+            friendlyAdjacentStrength == 0 &&
+            immediateRecapturePenalty > 0)
+        {
+            return false;
+        }
+
+        if (!cannotBeExceeded && immediateObjectiveKillThreat > 0)
+        {
+            return false;
+        }
+
+        if (!cannotBeExceeded && losesHillToSiege)
+        {
+            return false;
+        }
+
+        if (!cannotBeExceeded && !holdsInnerAdvantage)
+        {
+            return false;
+        }
+
+        if (!cannotBeExceeded && objectiveIsExposed && !dominatesInnerRing)
+        {
+            return false;
+        }
+
+        if (!cannotBeExceeded && immediateRecapturePenalty > 0 && !dominatesInnerRing)
+        {
+            return false;
+        }
+
+        return true;
+    }
+
     private static int EvaluateLevelFourSiegeApproachScore(
         KingOfTheHillGameState state,
         GameCommand command)
@@ -2079,6 +2713,13 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
         var sourceDistance = sourceUnit.Position.DistanceTo(HexCoordinate.Origin);
         var targetDistance = movedUnit.Position.DistanceTo(HexCoordinate.Origin);
         if (targetDistance >= sourceDistance || targetDistance > 2)
+        {
+            return 0;
+        }
+
+        if (sourceUnit.Strength < 4 &&
+            (HasLocalSiegeStagingMergeAvailable(state, sourceUnit) ||
+             CanAnchorLocalSiegeStagingMerge(state, sourceUnit)))
         {
             return 0;
         }
@@ -2387,7 +3028,8 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
         GameCommand command)
     {
         if (!NeedsObjectiveSiege(state, out var enemyOnObjective, out var currentContestCapacity) ||
-            !string.Equals(command.Name, "move", StringComparison.OrdinalIgnoreCase))
+            !string.Equals(command.Name, "move", StringComparison.OrdinalIgnoreCase) ||
+            ClassifyCommand(state, command) is CandidateClassification.Merge or CandidateClassification.MergeTowardObjective)
         {
             return 0;
         }
@@ -2410,6 +3052,13 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
             movedUnit.Position == HexCoordinate.Origin ||
             sourceDistance < 3 ||
             targetDistance >= sourceDistance)
+        {
+            return 0;
+        }
+
+        if (sourceUnit.Strength < 4 &&
+            (HasLocalSiegeStagingMergeAvailable(state, sourceUnit) ||
+             CanAnchorLocalSiegeStagingMerge(state, sourceUnit)))
         {
             return 0;
         }
@@ -2565,6 +3214,114 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
                 .Any(target =>
                     target.DistanceTo(HexCoordinate.Origin) < unit.Position.DistanceTo(HexCoordinate.Origin) &&
                     target.DistanceTo(HexCoordinate.Origin) <= 2));
+    }
+
+    private static bool HasLocalSiegeStagingMergeAvailable(
+        KingOfTheHillGameState state,
+        KingOfTheHillUnitState sourceUnit)
+    {
+        if (sourceUnit.Position == HexCoordinate.Origin)
+        {
+            return false;
+        }
+
+        var movementDepth = sourceUnit.Strength == 1 ? 2 : 1;
+        foreach (var target in state.Board.GetReachableCoordinates(sourceUnit.Position, movementDepth))
+        {
+            var targetUnit = state.FindUnitAt(target);
+            if (targetUnit is null ||
+                !string.Equals(targetUnit.OwnerPlayerId, sourceUnit.OwnerPlayerId, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (IsDefenderUnit(state, sourceUnit, sourceUnit.OwnerPlayerId) ||
+                IsDefenderUnit(state, targetUnit, sourceUnit.OwnerPlayerId))
+            {
+                continue;
+            }
+
+            var mergedStrength = sourceUnit.Strength + targetUnit.Strength;
+            if (mergedStrength is < 4 or > KingOfTheHillGameState.MaximumBlockStrength)
+            {
+                continue;
+            }
+
+            var targetDistance = target.DistanceTo(HexCoordinate.Origin);
+            if (targetDistance > 3)
+            {
+                continue;
+            }
+
+            var mergeCommand = CreateMoveCommand(sourceUnit.Id, target);
+            var result = KingOfTheHillGameRules.Execute(state, mergeCommand);
+            if (!result.Accepted)
+            {
+                continue;
+            }
+
+            var nextState = (KingOfTheHillGameState)result.State;
+            var mergedUnit = nextState.FindUnitAt(target);
+            if (mergedUnit is null ||
+                !string.Equals(mergedUnit.OwnerPlayerId, sourceUnit.OwnerPlayerId, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool CanAnchorLocalSiegeStagingMerge(
+        KingOfTheHillGameState state,
+        KingOfTheHillUnitState anchorUnit)
+    {
+        if (anchorUnit.Position == HexCoordinate.Origin ||
+            anchorUnit.Position.DistanceTo(HexCoordinate.Origin) > 3)
+        {
+            return false;
+        }
+
+        if (IsDefenderUnit(state, anchorUnit, anchorUnit.OwnerPlayerId))
+        {
+            return false;
+        }
+
+        return state.Units.Any(other =>
+        {
+            if (string.Equals(other.Id, anchorUnit.Id, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(other.OwnerPlayerId, anchorUnit.OwnerPlayerId, StringComparison.OrdinalIgnoreCase) ||
+                IsDefenderUnit(state, other, anchorUnit.OwnerPlayerId))
+            {
+                return false;
+            }
+
+            var mergedStrength = other.Strength + anchorUnit.Strength;
+            if (mergedStrength is < 4 or > KingOfTheHillGameState.MaximumBlockStrength)
+            {
+                return false;
+            }
+
+            var movementDepth = other.Strength == 1 ? 2 : 1;
+            if (!state.Board.GetReachableCoordinates(other.Position, movementDepth).Contains(anchorUnit.Position))
+            {
+                return false;
+            }
+
+            var mergeCommand = CreateMoveCommand(other.Id, anchorUnit.Position);
+            var result = KingOfTheHillGameRules.Execute(state, mergeCommand);
+            if (!result.Accepted)
+            {
+                return false;
+            }
+
+            var nextState = (KingOfTheHillGameState)result.State;
+            var mergedUnit = nextState.FindUnitAt(anchorUnit.Position);
+            return mergedUnit is not null &&
+                   string.Equals(mergedUnit.OwnerPlayerId, anchorUnit.OwnerPlayerId, StringComparison.OrdinalIgnoreCase);
+        });
     }
 
     private static int EvaluateObjectiveBreakthroughApproachScore(
@@ -2776,6 +3533,69 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
         return score;
     }
 
+    private static int EvaluateThreatenedDefenderRetreatScore(
+        KingOfTheHillGameState state,
+        GameCommand command)
+    {
+        if (!string.Equals(command.Name, "move", StringComparison.OrdinalIgnoreCase))
+        {
+            return 0;
+        }
+
+        var sourceUnit = state.FindUnit(command.GetRequiredArgument("unitId"));
+        if (sourceUnit is null ||
+            !IsThreatenedDefenderIdentityOnRingTwo(state, sourceUnit, state.CurrentPlayerId))
+        {
+            return 0;
+        }
+
+        var result = KingOfTheHillGameRules.Execute(state, command);
+        if (!result.Accepted)
+        {
+            return 0;
+        }
+
+        var nextState = (KingOfTheHillGameState)result.State;
+        if (!TryGetMoveContext(state, nextState, command, state.CurrentPlayerId, out _, out var movedUnit))
+        {
+            return 0;
+        }
+
+        var sourceDistance = sourceUnit.Position.DistanceTo(HexCoordinate.Origin);
+        var targetDistance = movedUnit.Position.DistanceTo(HexCoordinate.Origin);
+        if (targetDistance < sourceDistance)
+        {
+            return 0;
+        }
+
+        var sourceThreat = GetNextTurnThreatStrength(state, sourceUnit);
+        var targetThreat = GetNextTurnThreatStrength(nextState, movedUnit);
+        if (targetThreat >= sourceThreat)
+        {
+            return 0;
+        }
+
+        var score = 132_000;
+        score += (sourceThreat - targetThreat) * 8_000;
+        score += sourceUnit.Strength * 4_000;
+
+        if (targetThreat == 0)
+        {
+            score += 18_000;
+        }
+        else if (targetThreat <= movedUnit.Strength)
+        {
+            score += 9_000;
+        }
+
+        if (targetDistance > sourceDistance)
+        {
+            score += 6_000;
+        }
+
+        return score;
+    }
+
     private static int EvaluateDefenderAdvancePenalty(
         KingOfTheHillGameState state,
         KingOfTheHillUnitState sourceUnit,
@@ -2817,8 +3637,40 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
 
         var filteredEntries = rankedEntries
             .Where(entry =>
+                !ShouldSuppressThreatenedDefenderAdvance(state, entry.Command) &&
                 !ShouldSuppressDefenderInnerAdvance(state, entry.Command) &&
                 !ShouldSuppressDefenderAnchorDrift(state, entry.Command))
+            .ToArray();
+
+        return filteredEntries.Length > 0
+            ? filteredEntries
+            : rankedEntries;
+    }
+
+    private static IReadOnlyList<PreviewedCommand> ApplySiegeStagingRestrictions(
+        KingOfTheHillGameState state,
+        IReadOnlyList<PreviewedCommand> rankedEntries)
+    {
+        if (!NeedsObjectiveSiege(state, out _, out _))
+        {
+            return rankedEntries;
+        }
+
+        var filteredEntries = rankedEntries
+            .Where(entry => !ShouldSuppressWeakSiegeApproachForStagingMerge(state, entry.Command))
+            .ToArray();
+
+        return filteredEntries.Length > 0
+            ? filteredEntries
+            : rankedEntries;
+    }
+
+    private static IReadOnlyList<PreviewedCommand> ApplyObjectiveEntryRestrictions(
+        KingOfTheHillGameState state,
+        IReadOnlyList<PreviewedCommand> rankedEntries)
+    {
+        var filteredEntries = rankedEntries
+            .Where(entry => !ShouldSuppressObjectiveEntry(state, entry.Command))
             .ToArray();
 
         return filteredEntries.Length > 0
@@ -2876,9 +3728,7 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
             return false;
         }
 
-        return IsDefenderIdentifier(unit.Id) &&
-               !state.IsDefenderRetired(unit.Id) &&
-               !HasLostDefenderRoleToRingTwoThreat(state, unit);
+        return IsDefenderIdentifier(unit.Id);
     }
 
     private static bool IsDefenderIdentifier(string unitId) =>
@@ -2900,6 +3750,29 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
             state.Board.AreAdjacent(other.Position, unit.Position));
     }
 
+    private static bool IsThreatenedDefenderIdentityOnRingTwo(
+        KingOfTheHillGameState state,
+        KingOfTheHillUnitState unit,
+        string playerId)
+    {
+        return string.Equals(unit.OwnerPlayerId, playerId, StringComparison.OrdinalIgnoreCase) &&
+               IsDefenderIdentifier(unit.Id) &&
+               unit.Position.DistanceTo(HexCoordinate.Origin) <= 2 &&
+               HasAdjacentEnemyStrengthAtLeast(state, unit, 4);
+    }
+
+    private static bool IsThreatenedStrongUnit(
+        KingOfTheHillGameState state,
+        KingOfTheHillUnitState unit,
+        string playerId)
+    {
+        return string.Equals(unit.OwnerPlayerId, playerId, StringComparison.OrdinalIgnoreCase) &&
+               unit.Position != HexCoordinate.Origin &&
+               unit.Strength >= 3 &&
+               (GetImmediateThreatStrength(state, unit) > 0 ||
+                GetNextTurnThreatStrength(state, unit) > 0);
+    }
+
     private static bool ShouldSuppressDefenderObjectiveEntry(
         KingOfTheHillGameState state,
         GameCommand command)
@@ -2915,6 +3788,33 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
         var sourceUnit = state.FindUnit(command.GetRequiredArgument("unitId"));
         return sourceUnit is not null &&
                IsDefenderUnit(state, sourceUnit, state.CurrentPlayerId);
+    }
+
+    private static bool ShouldSuppressThreatenedDefenderAdvance(
+        KingOfTheHillGameState state,
+        GameCommand command)
+    {
+        var currentPlayer = state.Players.Single(player => player.Id == state.CurrentPlayerId);
+        if (currentPlayer.ControllerType != PlayerControllerType.IaLevel4 ||
+            !string.Equals(command.Name, "move", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var sourceUnit = state.FindUnit(command.GetRequiredArgument("unitId"));
+        if (sourceUnit is null ||
+            !IsThreatenedDefenderIdentityOnRingTwo(state, sourceUnit, state.CurrentPlayerId) ||
+            command.Arguments is null ||
+            !command.Arguments.TryGetValue("q", out var qValue) ||
+            !command.Arguments.TryGetValue("r", out var rValue) ||
+            !int.TryParse(qValue, out var q) ||
+            !int.TryParse(rValue, out var r))
+        {
+            return false;
+        }
+
+        var targetDistance = new HexCoordinate(q, r).DistanceTo(HexCoordinate.Origin);
+        return targetDistance < 2;
     }
 
     private static bool ShouldSuppressDefenderInnerAdvance(
@@ -2951,6 +3851,42 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
 
         return !IsImmediateDefenderInnerAdvanceException(state, command) &&
                !IsAcceptedDefenderR1Intercept(state, command);
+    }
+
+    private static bool ShouldSuppressWeakSiegeApproachForStagingMerge(
+        KingOfTheHillGameState state,
+        GameCommand command)
+    {
+        var classification = ClassifyCommand(state, command);
+        if (!string.Equals(command.Name, "move", StringComparison.OrdinalIgnoreCase) ||
+            classification != CandidateClassification.Other ||
+            command.Arguments is null)
+        {
+            return false;
+        }
+
+        var sourceUnit = state.FindUnit(command.GetRequiredArgument("unitId"));
+        if (sourceUnit is null ||
+            sourceUnit.Strength >= 4 ||
+            sourceUnit.Position == HexCoordinate.Origin ||
+            !command.Arguments.TryGetValue("q", out var qValue) ||
+            !command.Arguments.TryGetValue("r", out var rValue) ||
+            !int.TryParse(qValue, out var q) ||
+            !int.TryParse(rValue, out var r))
+        {
+            return false;
+        }
+
+        return HasLocalSiegeStagingMergeAvailable(state, sourceUnit) ||
+               CanAnchorLocalSiegeStagingMerge(state, sourceUnit);
+    }
+
+    private static bool ShouldSuppressObjectiveEntry(
+        KingOfTheHillGameState state,
+        GameCommand command)
+    {
+        return ClassifyCommand(state, command) == CandidateClassification.Objective &&
+               !IsStrategicObjectiveEntry(state, command, requireEndgamePhase: false);
     }
 
     private static bool IsImmediateDefenderInnerAdvanceException(
@@ -3008,6 +3944,11 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
         if (sourceUnit is null ||
             !IsDefenderUnit(state, sourceUnit, state.CurrentPlayerId) ||
             command.Arguments is null)
+        {
+            return false;
+        }
+
+        if (IsThreatenedDefenderIdentityOnRingTwo(state, sourceUnit, state.CurrentPlayerId))
         {
             return false;
         }
@@ -3226,6 +4167,196 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
                CanEnemyBuildSiegePressureSoon(state, interceptedEnemy);
     }
 
+    private static int EvaluateOpeningMergeSetupScore(
+        KingOfTheHillGameState state,
+        GameCommand command)
+    {
+        if (GetMatchPhase(state) != MatchPhase.Opening ||
+            !string.Equals(command.Name, "move", StringComparison.OrdinalIgnoreCase) ||
+            ClassifyCommand(state, command) != CandidateClassification.Other)
+        {
+            return 0;
+        }
+
+        var result = KingOfTheHillGameRules.Execute(state, command);
+        if (!result.Accepted)
+        {
+            return 0;
+        }
+
+        var nextState = (KingOfTheHillGameState)result.State;
+        if (!TryGetMoveContext(state, nextState, command, state.CurrentPlayerId, out var sourceUnit, out var movedUnit) ||
+            IsDefenderUnit(state, sourceUnit, state.CurrentPlayerId))
+        {
+            return 0;
+        }
+
+        var bestMergeStrength = 0;
+        var bestMergeRadius = int.MaxValue;
+        var bestSupportStrength = 0;
+
+        foreach (var supportUnit in nextState.Units.Where(unit =>
+                     unit.Id != movedUnit.Id &&
+                     string.Equals(unit.OwnerPlayerId, movedUnit.OwnerPlayerId, StringComparison.OrdinalIgnoreCase) &&
+                     !IsDefenderUnit(nextState, unit, movedUnit.OwnerPlayerId) &&
+                     nextState.Board.AreAdjacent(unit.Position, movedUnit.Position)))
+        {
+            var mergedStrength = movedUnit.Strength + supportUnit.Strength;
+            if (mergedStrength > KingOfTheHillGameState.MaximumBlockStrength)
+            {
+                continue;
+            }
+
+            var bestResultRadius = Math.Min(
+                movedUnit.Position.DistanceTo(HexCoordinate.Origin),
+                supportUnit.Position.DistanceTo(HexCoordinate.Origin));
+
+            if (mergedStrength > bestMergeStrength ||
+                (mergedStrength == bestMergeStrength && bestResultRadius < bestMergeRadius) ||
+                (mergedStrength == bestMergeStrength && bestResultRadius == bestMergeRadius && supportUnit.Strength > bestSupportStrength))
+            {
+                bestMergeStrength = mergedStrength;
+                bestMergeRadius = bestResultRadius;
+                bestSupportStrength = supportUnit.Strength;
+            }
+        }
+
+        if (bestMergeStrength == 0)
+        {
+            return 0;
+        }
+
+        if (bestMergeStrength < 3 && bestMergeRadius > 2)
+        {
+            return 0;
+        }
+
+        if (GetImmediateThreatStrength(nextState, movedUnit) > 0)
+        {
+            return 0;
+        }
+
+        var unsafeAdvancePenalty = EstimateUnsafeAdvancePenalty(nextState, movedUnit);
+        var sourceRadius = sourceUnit.Position.DistanceTo(HexCoordinate.Origin);
+        var movedRadius = movedUnit.Position.DistanceTo(HexCoordinate.Origin);
+        var score = 12_000;
+
+        score += bestMergeStrength switch
+        {
+            >= 4 => 32_000,
+            3 => 22_000,
+            2 => 8_000,
+            _ => 0
+        };
+
+        if (bestMergeRadius <= 2)
+        {
+            score += 14_000;
+        }
+        else if (bestMergeRadius == 3)
+        {
+            score += 7_000;
+        }
+
+        if (bestMergeRadius < movedRadius)
+        {
+            score += 6_000;
+        }
+
+        if (movedRadius < sourceRadius)
+        {
+            score += 4_000;
+        }
+
+        if (CanThreatenObjectiveWithinTurns(nextState, movedUnit, 3))
+        {
+            score += 6_000;
+        }
+
+        score -= unsafeAdvancePenalty * 12_000;
+        return score;
+    }
+
+    private static int EvaluateOpeningDirectMergeScore(
+        KingOfTheHillGameState state,
+        GameCommand command)
+    {
+        if (GetMatchPhase(state) != MatchPhase.Opening ||
+            ClassifyCommand(state, command) is not CandidateClassification.Merge and not CandidateClassification.MergeTowardObjective)
+        {
+            return 0;
+        }
+
+        var result = KingOfTheHillGameRules.Execute(state, command);
+        if (!result.Accepted)
+        {
+            return 0;
+        }
+
+        var nextState = (KingOfTheHillGameState)result.State;
+        if (!TryGetMoveContext(state, nextState, command, state.CurrentPlayerId, out var sourceUnit, out var mergedUnit) ||
+            IsDefenderUnit(state, sourceUnit, state.CurrentPlayerId))
+        {
+            return 0;
+        }
+
+        var mergeTarget = state.FindUnitAt(mergedUnit.Position);
+        if (mergeTarget is null ||
+            !string.Equals(mergeTarget.OwnerPlayerId, state.CurrentPlayerId, StringComparison.OrdinalIgnoreCase) ||
+            IsDefenderUnit(state, mergeTarget, state.CurrentPlayerId))
+        {
+            return 0;
+        }
+
+        var mergedImmediateThreat = GetImmediateThreatStrength(nextState, mergedUnit);
+        if (mergedImmediateThreat > 0)
+        {
+            return 0;
+        }
+
+        var mergedNextTurnThreat = GetNextTurnThreatStrength(nextState, mergedUnit);
+        if (mergedNextTurnThreat > mergedUnit.Strength)
+        {
+            return 0;
+        }
+
+        var mergedDistance = mergedUnit.Position.DistanceTo(HexCoordinate.Origin);
+        var sourceDistance = sourceUnit.Position.DistanceTo(HexCoordinate.Origin);
+        var targetDistance = mergeTarget.Position.DistanceTo(HexCoordinate.Origin);
+        var bestOriginalDistance = Math.Min(sourceDistance, targetDistance);
+
+        var score = 26_000;
+        score += mergedUnit.Strength switch
+        {
+            >= 4 => 28_000,
+            3 => 18_000,
+            _ => 0
+        };
+
+        score += Math.Max(0, 5 - mergedDistance) * 4_000;
+        score += Math.Max(0, bestOriginalDistance - mergedDistance) * 6_000;
+
+        if (CanThreatenObjectiveWithinTurns(nextState, mergedUnit, 3))
+        {
+            score += 10_000;
+        }
+
+        if (CanThreatenObjectiveWithinTurns(nextState, mergedUnit, 4))
+        {
+            score += 5_000;
+        }
+
+        var followUpMergeCount = nextState.Units.Count(unit =>
+            unit.Id != mergedUnit.Id &&
+            string.Equals(unit.OwnerPlayerId, mergedUnit.OwnerPlayerId, StringComparison.OrdinalIgnoreCase) &&
+            !IsDefenderUnit(nextState, unit, mergedUnit.OwnerPlayerId) &&
+            nextState.Board.AreAdjacent(unit.Position, mergedUnit.Position) &&
+            mergedUnit.Strength + unit.Strength <= KingOfTheHillGameState.MaximumBlockStrength);
+
+        score += followUpMergeCount * 3_000;
+        return score;
+    }
+
     private static int EvaluateDefensiveMergeScore(
         KingOfTheHillGameState state,
         GameCommand command)
@@ -3315,6 +4446,113 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
         if (CanThreatenObjectiveOnNextTurn(nextState, mergedUnit))
         {
             score += 3_500;
+        }
+
+        return score;
+    }
+
+    private static int EvaluateThreatNeutralizingMergeScore(
+        KingOfTheHillGameState state,
+        GameCommand command)
+    {
+        if (ClassifyCommand(state, command) is not CandidateClassification.Merge and not CandidateClassification.MergeTowardObjective)
+        {
+            return 0;
+        }
+
+        var sourceUnit = state.FindUnit(command.GetRequiredArgument("unitId"));
+        if (sourceUnit is null ||
+            command.Arguments is null ||
+            !command.Arguments.TryGetValue("q", out var qValue) ||
+            !command.Arguments.TryGetValue("r", out var rValue) ||
+            !int.TryParse(qValue, out var q) ||
+            !int.TryParse(rValue, out var r))
+        {
+            return 0;
+        }
+
+        var target = new HexCoordinate(q, r);
+        var targetUnit = state.FindUnitAt(target);
+        if (targetUnit is null ||
+            !string.Equals(targetUnit.OwnerPlayerId, sourceUnit.OwnerPlayerId, StringComparison.OrdinalIgnoreCase))
+        {
+            return 0;
+        }
+
+        var sourceImmediateThreat = GetImmediateThreatStrength(state, sourceUnit);
+        var sourceNextTurnThreat = GetNextTurnThreatStrength(state, sourceUnit);
+        var targetImmediateThreat = GetImmediateThreatStrength(state, targetUnit);
+        var targetNextTurnThreat = GetNextTurnThreatStrength(state, targetUnit);
+        var sourceThreat = Math.Max(sourceImmediateThreat, sourceNextTurnThreat);
+        var targetThreat = Math.Max(targetImmediateThreat, targetNextTurnThreat);
+
+        if (sourceThreat == 0 && targetThreat == 0)
+        {
+            return 0;
+        }
+
+        var result = KingOfTheHillGameRules.Execute(state, command);
+        if (!result.Accepted)
+        {
+            return 0;
+        }
+
+        var nextState = (KingOfTheHillGameState)result.State;
+        var mergedUnit = nextState.FindUnitAt(target);
+        if (mergedUnit is null ||
+            !string.Equals(mergedUnit.OwnerPlayerId, sourceUnit.OwnerPlayerId, StringComparison.OrdinalIgnoreCase))
+        {
+            return 0;
+        }
+
+        var mergedImmediateThreat = GetImmediateThreatStrength(nextState, mergedUnit);
+        var mergedNextTurnThreat = GetNextTurnThreatStrength(nextState, mergedUnit);
+        if (mergedImmediateThreat > 0 || mergedNextTurnThreat > 0)
+        {
+            return 0;
+        }
+
+        var highestOriginalThreat = Math.Max(sourceThreat, targetThreat);
+        var targetDistance = target.DistanceTo(HexCoordinate.Origin);
+        var sourceDistance = sourceUnit.Position.DistanceTo(HexCoordinate.Origin);
+        var strongestThreatenedMaterial = 0;
+
+        if (sourceThreat > 0)
+        {
+            strongestThreatenedMaterial = Math.Max(strongestThreatenedMaterial, sourceUnit.Strength);
+        }
+
+        if (targetThreat > 0)
+        {
+            strongestThreatenedMaterial = Math.Max(strongestThreatenedMaterial, targetUnit.Strength);
+        }
+
+        var score = 140_000;
+        score += mergedUnit.Strength * 20_000;
+        score += strongestThreatenedMaterial * 6_000;
+        score += (sourceThreat > 0 ? sourceUnit.Strength : 0) * 2_000;
+        score += (targetThreat > 0 ? targetUnit.Strength : 0) * 2_000;
+
+        if (mergedUnit.Strength > highestOriginalThreat)
+        {
+            score += 18_000 + (mergedUnit.Strength - highestOriginalThreat) * 8_000;
+        }
+        else
+        {
+            score += 8_000;
+        }
+
+        if (targetThreat > 0)
+        {
+            score += 10_000;
+        }
+
+        score += Math.Max(0, sourceDistance - targetDistance) * 4_000;
+        score += Math.Max(0, 4 - targetDistance) * 2_500;
+
+        if (CanThreatenObjectiveOnNextTurn(nextState, mergedUnit))
+        {
+            score += 6_000;
         }
 
         return score;
@@ -3458,6 +4696,110 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
         score -= EvaluateImmediateRecapturePenalty(nextState, movedUnit, sourceDistance, targetDistance);
 
         return score;
+    }
+
+    private static int EvaluateStrategicAdvanceScore(
+        KingOfTheHillGameState state,
+        GameCommand command)
+    {
+        if (!string.Equals(command.Name, "move", StringComparison.OrdinalIgnoreCase))
+        {
+            return 0;
+        }
+
+        var classification = ClassifyCommand(state, command);
+        if (classification is CandidateClassification.Objective or CandidateClassification.KillInnerOrSameRing or CandidateClassification.KillOuterSafe)
+        {
+            return 0;
+        }
+
+        var result = KingOfTheHillGameRules.Execute(state, command);
+        if (!result.Accepted)
+        {
+            return 0;
+        }
+
+        var nextState = (KingOfTheHillGameState)result.State;
+        if (!TryGetMoveContext(state, nextState, command, state.CurrentPlayerId, out var sourceUnit, out var movedUnit))
+        {
+            return 0;
+        }
+
+        var sourceDistance = sourceUnit.Position.DistanceTo(HexCoordinate.Origin);
+        var targetDistance = movedUnit.Position.DistanceTo(HexCoordinate.Origin);
+
+        if (IsDefenderUnit(state, sourceUnit, state.CurrentPlayerId) && !state.IsDefenderRetired(sourceUnit.Id))
+        {
+            return 0;
+        }
+
+        if (targetDistance > sourceDistance)
+        {
+            return 0;
+        }
+
+        var immediateThreat = GetImmediateThreatStrength(nextState, movedUnit);
+        var nextTurnThreat = GetNextTurnThreatStrength(nextState, movedUnit);
+        if (immediateThreat > movedUnit.Strength || nextTurnThreat > movedUnit.Strength)
+        {
+            return 0;
+        }
+
+        var score = 0;
+
+        if (targetDistance < sourceDistance)
+        {
+            score += (sourceDistance - targetDistance) * 16_000;
+        }
+        else if (targetDistance == sourceDistance && targetDistance <= 3)
+        {
+            score += 5_000;
+        }
+
+        if (classification is CandidateClassification.Merge or CandidateClassification.MergeTowardObjective)
+        {
+            score += movedUnit.Strength switch
+            {
+                >= 4 => 18_000,
+                3 => 12_000,
+                2 => 4_000,
+                _ => 0
+            };
+        }
+        else
+        {
+            if (HasLocalSiegeStagingMergeAvailable(nextState, movedUnit))
+            {
+                score += 20_000;
+            }
+            else if (CanAnchorLocalSiegeStagingMerge(nextState, movedUnit))
+            {
+                score += 14_000;
+            }
+        }
+
+        if (targetDistance <= 2)
+        {
+            score += 8_000;
+        }
+        else if (targetDistance == 3)
+        {
+            score += 3_000;
+        }
+
+        if (movedUnit.Strength >= 3)
+        {
+            score += 6_000;
+        }
+
+        if (CanThreatenObjectiveWithinTurns(nextState, movedUnit, 3))
+        {
+            score += 8_000;
+        }
+
+        score -= immediateThreat * 4_000;
+        score -= nextTurnThreat * 2_500;
+        return Math.Max(0, score);
     }
 
     private static KillOpportunity EvaluateKillOpportunity(
@@ -3664,7 +5006,7 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
         int targetDistance)
     {
         var sourceDistance = sourceUnit.Position.DistanceTo(HexCoordinate.Origin);
-        if (sourceDistance > 1 || targetDistance <= sourceDistance)
+        if (targetDistance <= sourceDistance)
         {
             return 0;
         }
@@ -3678,12 +5020,14 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
         }
 
         var immediateThreat = GetImmediateThreatStrength(state, sourceUnit);
-        if (immediateThreat > sourceUnit.Strength)
+        var nextTurnThreat = GetNextTurnThreatStrength(state, sourceUnit);
+        if (immediateThreat > sourceUnit.Strength || nextTurnThreat > sourceUnit.Strength)
         {
             return 0;
         }
 
-        var penalty = 28_000 + sourceUnit.Strength * 3_000;
+        var penalty = 24_000 + sourceUnit.Strength * 2_500;
+        penalty += (targetDistance - sourceDistance) * 10_000;
 
         if (targetDistance == 2)
         {
@@ -3692,6 +5036,11 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
         else if (targetDistance > 2)
         {
             penalty += 14_000;
+        }
+
+        if (sourceDistance <= 2)
+        {
+            penalty += 8_000;
         }
 
         return penalty;
@@ -3800,10 +5149,17 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
             instrumentation.LeafEvaluations,
             chosenCommand.Score,
             elapsedMilliseconds,
+            instrumentation.GenerationMilliseconds,
+            instrumentation.PreviewMilliseconds,
+            instrumentation.PreviewExecutionMilliseconds,
+            instrumentation.PreviewBaseEvaluationMilliseconds,
+            instrumentation.PreviewImmediateBiasMilliseconds,
+            instrumentation.SelectionMilliseconds,
             instrumentation.TimeBudgetReached,
             chosenCommandDescription,
             chosenCommand.DecisionRuleCode,
-            chosenCommand.DecisionRuleName);
+            chosenCommand.DecisionRuleName,
+            instrumentation.GetDecisionDiagnostics());
 
         return new AutomatedDecisionResult(chosenCommand.Command, telemetry);
     }
@@ -3827,16 +5183,6 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
         if (unit is null)
         {
             return string.Empty;
-        }
-
-        if (state.IsDefenderRetired(unitId))
-        {
-            return " | former defender (retired)";
-        }
-
-        if (HasLostDefenderRoleToRingTwoThreat(state, unit))
-        {
-            return " | defender role disabled by adjacent S4+ threat on r2";
         }
 
         return string.Empty;
@@ -3879,6 +5225,8 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
 
     private sealed class SearchInstrumentation
     {
+        private readonly Dictionary<string, string> _ruleDiagnostics = new(StringComparer.OrdinalIgnoreCase);
+
         public int LegalCommandCount { get; set; }
 
         public int CandidateCommandCount { get; set; }
@@ -3888,6 +5236,42 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
         public int LeafEvaluations { get; set; }
 
         public bool TimeBudgetReached { get; set; }
+
+        public double GenerationMilliseconds { get; set; }
+
+        public double PreviewMilliseconds { get; set; }
+
+        public double PreviewExecutionMilliseconds { get; set; }
+
+        public double PreviewBaseEvaluationMilliseconds { get; set; }
+
+        public double PreviewImmediateBiasMilliseconds { get; set; }
+
+        public double SelectionMilliseconds { get; set; }
+
+        public void RecordRuleDiagnostic(string ruleCode, ScoredCommand? command)
+        {
+            if (command is null)
+            {
+                _ruleDiagnostics[ruleCode] = "-";
+                return;
+            }
+
+            _ruleDiagnostics[ruleCode] = $"{command.Score} {FormatCommand(command.Command)}";
+        }
+
+        public string? GetDecisionDiagnostics()
+        {
+            if (_ruleDiagnostics.Count == 0)
+            {
+                return null;
+            }
+
+            return string.Join(" | ",
+                _ruleDiagnostics
+                    .OrderBy(entry => entry.Key, StringComparer.OrdinalIgnoreCase)
+                    .Select(entry => $"{entry.Key}={entry.Value}"));
+        }
     }
 
     private static MatchPhase GetMatchPhase(KingOfTheHillGameState state)
@@ -3906,9 +5290,22 @@ internal abstract class KingOfTheHillMinimaxAiPlayer : IKingOfTheHillAiPlayer
             }
         }
 
-        return state.TurnNumber <= 4
+        return IsOpeningPhase(state)
             ? MatchPhase.Opening
             : MatchPhase.Midgame;
+    }
+
+    private static bool IsOpeningPhase(KingOfTheHillGameState state)
+    {
+        if (state.FindUnitAt(HexCoordinate.Origin) is not null)
+        {
+            return false;
+        }
+
+        return !state.Units.Any(unit =>
+            unit.Position.DistanceTo(HexCoordinate.Origin) == 1 &&
+            unit.Strength >= 3 &&
+            !IsDefenderUnit(state, unit, unit.OwnerPlayerId));
     }
 
     private enum MatchPhase
@@ -3950,7 +5347,9 @@ internal sealed class KingOfTheHillAiLevel4Player : KingOfTheHillMinimaxAiPlayer
 
 internal static class KingOfTheHillAiMoveGenerator
 {
-    public static IReadOnlyList<GameCommand> GenerateLegalCommands(KingOfTheHillGameState state)
+    public static IReadOnlyList<GameCommand> GenerateLegalCommands(
+        KingOfTheHillGameState state,
+        bool evaluateVictory = true)
     {
         var commands = state.Units
             .Where(unit => unit.OwnerPlayerId == state.CurrentPlayerId)
@@ -3961,18 +5360,26 @@ internal static class KingOfTheHillAiMoveGenerator
                     .GetReachableCoordinates(unit.Position, movementDepth)
                     .Select(target => CreateMoveCommand(unit.Id, target));
             })
-            .Where(command => KingOfTheHillGameRules.Execute(state, command).Accepted)
+            .Where(command => ValidateCommand(state, command, evaluateVictory).Accepted)
             .Distinct()
             .ToList();
 
         var pass = new GameCommand("pass");
-        if (KingOfTheHillGameRules.Execute(state, pass).Accepted)
+        if (ValidateCommand(state, pass, evaluateVictory).Accepted)
         {
             commands.Add(pass);
         }
 
         return commands;
     }
+
+    private static GameCommandResult ValidateCommand(
+        KingOfTheHillGameState state,
+        GameCommand command,
+        bool evaluateVictory) =>
+        evaluateVictory
+            ? KingOfTheHillGameRules.Execute(state, command)
+            : KingOfTheHillGameRules.Preview(state, command);
 
     private static GameCommand CreateMoveCommand(string unitId, HexCoordinate target) =>
         new(

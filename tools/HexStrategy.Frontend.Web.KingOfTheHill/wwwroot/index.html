@@ -59,10 +59,10 @@
         <ul>
           <li>Click one of the active player's units to select it.</li>
           <li>Click the same unit again, or use Clear Selection, to cancel selection.</li>
-          <li>Single units may move up to two hexes. Stacked blocks may move one.</li>
-          <li>Gold hexes are normal moves. Teal hexes are friendly merges.</li>
-          <li>Green hexes are favorable attacks that can eliminate the enemy block.</li>
-          <li>Use Pass Turn to keep control of the hill.</li>
+          <li>Singles move up to two hexes. Every other role moves one.</li>
+          <li>Only Singles may enter the Hill. Doubles may stop in `r1`.</li>
+          <li>Defenders and Attackers stay outside the hill ring.</li>
+          <li>Gold hexes are moves. Teal hexes are friendly merges. Green hexes are favorable attacks.</li>
         </ul>
         <div class="legend">
           <div class="legend-item">
@@ -145,7 +145,8 @@
         </label>
       </div>
       <p class="setup-note">Choose Human or the current reference AI profile for each side.</p>
-      <p class="setup-note">Victory: hold the Hill until the opponent cannot exceed the strength on Objective. If your adjacent pressure is higher than the defender's total hill defense, the defender loses 1S at end turn.</p>
+      <p class="setup-note">Victory: the first Single unit to enter the Hill wins immediately.</p>
+      <p class="setup-note">Singles may enter `r0`, Doubles may stop at `r1`, and Defenders plus Attackers stay outside the hill ring.</p>
       <label class="modal-toggle">
         <input id="match-setup-rewind-checkbox" type="checkbox">
         <span>Rewind last movement</span>

@@ -195,6 +195,69 @@ public sealed class KingOfTheHillGameMatchTests
     }
 
     [Fact]
+    public void AutomatedDefinition_DoesNotEnterObjective_WhenAdjacentEnemyCanKillImmediately()
+    {
+        var definition = new KingOfTheHillGameDefinition();
+        var template = Assert.IsType<KingOfTheHillGameState>(definition.CreateInitialState(
+            CreatePlayers(PlayerControllerType.Human, PlayerControllerType.IaLevel4)));
+        var state = template with
+        {
+            Units = new[]
+            {
+                KingOfTheHillUnitState.CreateSeededBlock("2X", "P2", new HexCoordinate(0, -1), 3),
+                KingOfTheHillUnitState.CreateSeededBlock("2B", "P2", new HexCoordinate(2, -2), 2),
+                KingOfTheHillUnitState.CreateSeededBlock("1H", "P1", new HexCoordinate(-1, 0), 4)
+            },
+            CurrentPlayerId = "P2",
+            TurnNumber = 1,
+            IsCompleted = false,
+            WinnerPlayerId = null,
+            ControlScores = new Dictionary<string, int>
+            {
+                ["P1"] = 0,
+                ["P2"] = 0
+            }
+        };
+
+        var decision = definition.ChooseAutomatedCommand(state, state.CurrentPlayer);
+
+        Assert.False(
+            string.Equals(decision.Command.Name, "move", StringComparison.OrdinalIgnoreCase) &&
+            decision.Command.GetRequiredArgument("unitId") == "2X" &&
+            decision.Command.GetRequiredArgument("q") == "0" &&
+            decision.Command.GetRequiredArgument("r") == "0");
+    }
+
+    [Fact]
+    public void AutomatedDefinition_DoesNotPass_OutsideClearWinningObjectiveState()
+    {
+        var definition = new KingOfTheHillGameDefinition();
+        var template = Assert.IsType<KingOfTheHillGameState>(definition.CreateInitialState(
+            CreatePlayers(PlayerControllerType.Human, PlayerControllerType.IaLevel4)));
+        var state = template with
+        {
+            Units = new[]
+            {
+                KingOfTheHillUnitState.CreateSeededBlock("2E", "P2", new HexCoordinate(2, 1), 3),
+                KingOfTheHillUnitState.CreateSeededBlock("1E", "P1", new HexCoordinate(0, 1), 4)
+            },
+            CurrentPlayerId = "P2",
+            TurnNumber = 3,
+            IsCompleted = false,
+            WinnerPlayerId = null,
+            ControlScores = new Dictionary<string, int>
+            {
+                ["P1"] = 0,
+                ["P2"] = 0
+            }
+        };
+
+        var decision = definition.ChooseAutomatedCommand(state, state.CurrentPlayer);
+
+        Assert.NotEqual("pass", decision.Command.Name);
+    }
+
+    [Fact]
     public void AutomatedDefinition_ObjectiveEmergencyRetreatScore_IsPositive_ForSafeExit()
     {
         var definition = new KingOfTheHillGameDefinition();
@@ -364,6 +427,227 @@ public sealed class KingOfTheHillGameMatchTests
     }
 
     [Fact]
+    public void AutomatedDefinition_ThreatenedDefenderRetreats_InsteadOfAdvancingInward()
+    {
+        var definition = new KingOfTheHillGameDefinition();
+        var template = Assert.IsType<KingOfTheHillGameState>(definition.CreateInitialState(
+            CreatePlayers(PlayerControllerType.Human, PlayerControllerType.IaLevel4)));
+        var state = template with
+        {
+            Units = new[]
+            {
+                KingOfTheHillUnitState.CreateSeededBlock("2V", "P2", new HexCoordinate(1, 1), 3),
+                KingOfTheHillUnitState.CreateSeededBlock("2T", "P2", new HexCoordinate(-1, 2), 3),
+                KingOfTheHillUnitState.CreateSeededBlock("2X", "P2", new HexCoordinate(-2, 1), 3),
+                KingOfTheHillUnitState.CreateSeededBlock("1E", "P1", new HexCoordinate(0, 1), 4)
+            },
+            CurrentPlayerId = "P2",
+            TurnNumber = 2,
+            IsCompleted = false,
+            WinnerPlayerId = null,
+            ControlScores = new Dictionary<string, int>
+            {
+                ["P1"] = 0,
+                ["P2"] = 0
+            }
+        };
+
+        var decision = definition.ChooseAutomatedCommand(state, state.CurrentPlayer);
+
+        Assert.Equal("move", decision.Command.Name);
+        Assert.Contains(decision.Command.GetRequiredArgument("unitId"), new[] { "2T", "2V" });
+        Assert.Equal("KH-075", decision.Telemetry.DecisionRuleCode);
+
+        var target = new HexCoordinate(
+            int.Parse(decision.Command.GetRequiredArgument("q")),
+            int.Parse(decision.Command.GetRequiredArgument("r")));
+
+        Assert.True(target.DistanceTo(HexCoordinate.Origin) >= 2);
+    }
+
+    [Fact]
+    public void AutomatedDefinition_StrongThreatenedUnitRetreats_EvenWithoutDefenderRole()
+    {
+        var definition = new KingOfTheHillGameDefinition();
+        var template = Assert.IsType<KingOfTheHillGameState>(definition.CreateInitialState(
+            CreatePlayers(PlayerControllerType.Human, PlayerControllerType.IaLevel4)));
+        var state = template with
+        {
+            Units = new[]
+            {
+                KingOfTheHillUnitState.CreateSeededBlock("2E", "P2", new HexCoordinate(1, 1), 3),
+                KingOfTheHillUnitState.CreateSeededBlock("2B", "P2", new HexCoordinate(2, -2), 2),
+                KingOfTheHillUnitState.CreateSeededBlock("1E", "P1", new HexCoordinate(0, 1), 4)
+            },
+            CurrentPlayerId = "P2",
+            TurnNumber = 4,
+            IsCompleted = false,
+            WinnerPlayerId = null,
+            ControlScores = new Dictionary<string, int>
+            {
+                ["P1"] = 0,
+                ["P2"] = 0
+            }
+        };
+
+        var decision = definition.ChooseAutomatedCommand(state, state.CurrentPlayer);
+
+        Assert.Equal("move", decision.Command.Name);
+        Assert.Equal("2E", decision.Command.GetRequiredArgument("unitId"));
+        Assert.Equal("KH-075", decision.Telemetry.DecisionRuleCode);
+
+        var target = new HexCoordinate(
+            int.Parse(decision.Command.GetRequiredArgument("q")),
+            int.Parse(decision.Command.GetRequiredArgument("r")));
+
+        Assert.True(target.DistanceTo(HexCoordinate.Origin) >= 2);
+    }
+
+    [Fact]
+    public void AutomatedDefinition_ThreatenedStrongUnitTakesPriority_OverLineAdvance()
+    {
+        var definition = new KingOfTheHillGameDefinition();
+        var template = Assert.IsType<KingOfTheHillGameState>(definition.CreateInitialState(
+            CreatePlayers(PlayerControllerType.Human, PlayerControllerType.IaLevel4)));
+        var state = template with
+        {
+            Units = new[]
+            {
+                KingOfTheHillUnitState.CreateSeededBlock("2V", "P2", new HexCoordinate(1, 1), 3),
+                KingOfTheHillUnitState.CreateSeededBlock("2E", "P2", new HexCoordinate(4, 0), 1),
+                KingOfTheHillUnitState.CreateSeededBlock("1E", "P1", new HexCoordinate(0, 1), 4)
+            },
+            CurrentPlayerId = "P2",
+            TurnNumber = 5,
+            IsCompleted = false,
+            WinnerPlayerId = null,
+            ControlScores = new Dictionary<string, int>
+            {
+                ["P1"] = 0,
+                ["P2"] = 0
+            }
+        };
+
+        var decision = definition.ChooseAutomatedCommand(state, state.CurrentPlayer);
+
+        Assert.Equal("move", decision.Command.Name);
+        Assert.Equal("2V", decision.Command.GetRequiredArgument("unitId"));
+        Assert.Equal("KH-075", decision.Telemetry.DecisionRuleCode);
+
+        var target = new HexCoordinate(
+            int.Parse(decision.Command.GetRequiredArgument("q")),
+            int.Parse(decision.Command.GetRequiredArgument("r")));
+
+        Assert.True(target.DistanceTo(HexCoordinate.Origin) >= 2);
+    }
+
+    [Fact]
+    public void AutomatedDefinition_PrefersThreatNeutralizingMerge_OverRetreat_WhenMergeCancelsThreat()
+    {
+        var definition = new KingOfTheHillGameDefinition();
+        var template = Assert.IsType<KingOfTheHillGameState>(definition.CreateInitialState(
+            CreatePlayers(PlayerControllerType.Human, PlayerControllerType.IaLevel4)));
+        var state = template with
+        {
+            Units = new[]
+            {
+                KingOfTheHillUnitState.CreateSeededBlock("2E", "P2", new HexCoordinate(1, 1), 3),
+                KingOfTheHillUnitState.CreateSingle("2B", "P2", new HexCoordinate(2, 1)),
+                KingOfTheHillUnitState.CreateSeededBlock("1E", "P1", new HexCoordinate(0, 1), 4)
+            },
+            CurrentPlayerId = "P2",
+            TurnNumber = 5,
+            IsCompleted = false,
+            WinnerPlayerId = null,
+            ControlScores = new Dictionary<string, int>
+            {
+                ["P1"] = 0,
+                ["P2"] = 0
+            }
+        };
+
+        var decision = definition.ChooseAutomatedCommand(state, state.CurrentPlayer);
+
+        Assert.Equal("move", decision.Command.Name);
+        Assert.Equal("2B", decision.Command.GetRequiredArgument("unitId"));
+        Assert.Equal("1", decision.Command.GetRequiredArgument("q"));
+        Assert.Equal("1", decision.Command.GetRequiredArgument("r"));
+        Assert.Equal("KH-073", decision.Telemetry.DecisionRuleCode);
+    }
+
+    [Fact]
+    public void AutomatedDefinition_PrefersSiegeMergeToS4_BeforeWeakInwardApproach()
+    {
+        var definition = new KingOfTheHillGameDefinition();
+        var template = Assert.IsType<KingOfTheHillGameState>(definition.CreateInitialState(
+            CreatePlayers(PlayerControllerType.Human, PlayerControllerType.IaLevel4)));
+        var state = template with
+        {
+            Units = new[]
+            {
+                KingOfTheHillUnitState.CreateSeededBlock("1H", "P1", HexCoordinate.Origin, 4),
+                KingOfTheHillUnitState.CreateSingle("2E", "P2", new HexCoordinate(3, 1)),
+                KingOfTheHillUnitState.CreateSeededBlock("2B", "P2", new HexCoordinate(2, 1), 3)
+            },
+            CurrentPlayerId = "P2",
+            TurnNumber = 6,
+            IsCompleted = false,
+            WinnerPlayerId = null,
+            ControlScores = new Dictionary<string, int>
+            {
+                ["P1"] = 0,
+                ["P2"] = 0
+            }
+        };
+
+        var decision = definition.ChooseAutomatedCommand(state, state.CurrentPlayer);
+
+        Assert.Equal("move", decision.Command.Name);
+        Assert.Contains(decision.Telemetry.DecisionRuleCode, new[] { "KH-080", "KH-090", "KH-120" });
+        Assert.Contains(decision.Command.GetRequiredArgument("unitId"), new[] { "2E", "2B" });
+
+        var target = new HexCoordinate(
+            int.Parse(decision.Command.GetRequiredArgument("q")),
+            int.Parse(decision.Command.GetRequiredArgument("r")));
+
+        Assert.Equal(new HexCoordinate(2, 1), target);
+    }
+
+    [Fact]
+    public void AutomatedDefinition_DoesNotEnterObjective_WhenInnerRingIsInferior()
+    {
+        var definition = new KingOfTheHillGameDefinition();
+        var template = Assert.IsType<KingOfTheHillGameState>(definition.CreateInitialState(
+            CreatePlayers(PlayerControllerType.Human, PlayerControllerType.IaLevel4)));
+        var state = template with
+        {
+            Units = new[]
+            {
+                KingOfTheHillUnitState.CreateSeededBlock("2G", "P2", new HexCoordinate(0, -1), 3),
+                KingOfTheHillUnitState.CreateSeededBlock("1E", "P1", new HexCoordinate(-1, 0), 4),
+                KingOfTheHillUnitState.CreateSeededBlock("1G", "P1", new HexCoordinate(0, 1), 4)
+            },
+            CurrentPlayerId = "P2",
+            TurnNumber = 8,
+            IsCompleted = false,
+            WinnerPlayerId = null,
+            ControlScores = new Dictionary<string, int>
+            {
+                ["P1"] = 0,
+                ["P2"] = 0
+            }
+        };
+
+        var decision = definition.ChooseAutomatedCommand(state, state.CurrentPlayer);
+
+        Assert.False(
+            string.Equals(decision.Command.Name, "move", StringComparison.OrdinalIgnoreCase) &&
+            decision.Command.GetRequiredArgument("unitId") == "2G" &&
+            decision.Command.GetRequiredArgument("q") == "0" &&
+            decision.Command.GetRequiredArgument("r") == "0");
+    }
+
+    [Fact]
     public void AutomatedDefinition_DefenderPrioritizesOpeningLaneDenial_BeforeGenericFallback()
     {
         var definition = new KingOfTheHillGameDefinition();
@@ -398,6 +682,118 @@ public sealed class KingOfTheHillGameMatchTests
         Assert.Equal("-3", decision.Command.GetRequiredArgument("q"));
         Assert.Equal("1", decision.Command.GetRequiredArgument("r"));
         Assert.Equal("KH-088", decision.Telemetry.DecisionRuleCode);
+    }
+
+    [Fact]
+    public void AutomatedDefinition_UsesOpeningMergeSetup_BeforeFallback_WhenItBuildsAStrongerInnerBlock()
+    {
+        var definition = new KingOfTheHillGameDefinition();
+        var template = Assert.IsType<KingOfTheHillGameState>(definition.CreateInitialState(
+            CreatePlayers(PlayerControllerType.Human, PlayerControllerType.IaLevel4)));
+        var state = template with
+        {
+            Units = new[]
+            {
+                KingOfTheHillUnitState.CreateSingle("2E", "P2", new HexCoordinate(5, -2)),
+                KingOfTheHillUnitState.CreateSingle("2H", "P2", new HexCoordinate(5, -1)),
+                KingOfTheHillUnitState.CreateSeededBlock("2F", "P2", new HexCoordinate(4, -2), 2),
+                KingOfTheHillUnitState.CreateSeededBlock("1F", "P1", new HexCoordinate(-4, 2), 3)
+            },
+            CurrentPlayerId = "P2",
+            TurnNumber = 1,
+            IsCompleted = false,
+            WinnerPlayerId = null,
+            ControlScores = new Dictionary<string, int>
+            {
+                ["P1"] = 0,
+                ["P2"] = 0
+            }
+        };
+
+        var decision = definition.ChooseAutomatedCommand(state, state.CurrentPlayer);
+
+        Assert.Equal("move", decision.Command.Name);
+        Assert.Equal("KH-092", decision.Telemetry.DecisionRuleCode);
+        Assert.Equal("2E", decision.Command.GetRequiredArgument("unitId"));
+
+        var target = new HexCoordinate(
+            int.Parse(decision.Command.GetRequiredArgument("q")),
+            int.Parse(decision.Command.GetRequiredArgument("r")));
+
+        Assert.True(target.DistanceTo(HexCoordinate.Origin) <= 3);
+        Assert.True(
+            target == new HexCoordinate(4, -1) ||
+            target == new HexCoordinate(3, 0) ||
+            target == new HexCoordinate(3, -1));
+    }
+
+    [Fact]
+    public void AutomatedDefinition_DoesNotUseOpeningMergeSetup_WhenPreparationHexIsImmediatelyThreatened()
+    {
+        var definition = new KingOfTheHillGameDefinition();
+        var template = Assert.IsType<KingOfTheHillGameState>(definition.CreateInitialState(
+            CreatePlayers(PlayerControllerType.Human, PlayerControllerType.IaLevel4)));
+        var state = template with
+        {
+            Units = new[]
+            {
+                KingOfTheHillUnitState.CreateSingle("2E", "P2", new HexCoordinate(4, 0)),
+                KingOfTheHillUnitState.CreateSeededBlock("2F", "P2", new HexCoordinate(4, -2), 2),
+                KingOfTheHillUnitState.CreateSeededBlock("1X", "P1", new HexCoordinate(2, -1), 3),
+                KingOfTheHillUnitState.CreateSeededBlock("1F", "P1", new HexCoordinate(-4, 2), 3)
+            },
+            CurrentPlayerId = "P2",
+            TurnNumber = 1,
+            IsCompleted = false,
+            WinnerPlayerId = null,
+            ControlScores = new Dictionary<string, int>
+            {
+                ["P1"] = 0,
+                ["P2"] = 0
+            }
+        };
+
+        var decision = definition.ChooseAutomatedCommand(state, state.CurrentPlayer);
+
+        Assert.False(
+            decision.Telemetry.DecisionRuleCode == "KH-092" &&
+            decision.Command.GetRequiredArgument("unitId") == "2E" &&
+            decision.Command.GetRequiredArgument("q") == "3" &&
+            decision.Command.GetRequiredArgument("r") == "-1");
+    }
+
+    [Fact]
+    public void AutomatedDefinition_PrefersOpeningDirectMerge_OverMergeSetup_WhenSafeMergeAlreadyExists()
+    {
+        var definition = new KingOfTheHillGameDefinition();
+        var template = Assert.IsType<KingOfTheHillGameState>(definition.CreateInitialState(
+            CreatePlayers(PlayerControllerType.Human, PlayerControllerType.IaLevel4)));
+        var state = template with
+        {
+            Units = new[]
+            {
+                KingOfTheHillUnitState.CreateSeededBlock("2F", "P2", new HexCoordinate(4, -2), 2),
+                KingOfTheHillUnitState.CreateSingle("2W", "P2", new HexCoordinate(6, -2)),
+                KingOfTheHillUnitState.CreateSingle("2E", "P2", new HexCoordinate(4, -1)),
+                KingOfTheHillUnitState.CreateSeededBlock("1X", "P1", new HexCoordinate(2, -1), 3)
+            },
+            CurrentPlayerId = "P2",
+            TurnNumber = 1,
+            IsCompleted = false,
+            WinnerPlayerId = null,
+            ControlScores = new Dictionary<string, int>
+            {
+                ["P1"] = 0,
+                ["P2"] = 0
+            }
+        };
+
+        var decision = definition.ChooseAutomatedCommand(state, state.CurrentPlayer);
+
+        Assert.Equal("KH-091", decision.Telemetry.DecisionRuleCode);
+        Assert.Equal("2W", decision.Command.GetRequiredArgument("unitId"));
+        Assert.Equal("4", decision.Command.GetRequiredArgument("q"));
+        Assert.Equal("-2", decision.Command.GetRequiredArgument("r"));
     }
 
     [Fact]
@@ -1201,7 +1597,47 @@ public sealed class KingOfTheHillGameMatchTests
         Assert.True(updatedState.IsCompleted);
         Assert.Equal("P1", updatedState.WinnerPlayerId);
         Assert.Equal(4, updatedState.ControlScores["P1"]);
-        Assert.Contains("cannot exceed the strength on Objective", result.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("wins", result.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Execute_SealedHillEndsMatch_EvenWhenTrailingPlayerStillHasHigherTotalStrength()
+    {
+        var match = matchService.StartNew(KingOfTheHillGameDefinition.GameDefinitionId);
+        var state = Assert.IsType<KingOfTheHillGameState>(match.State);
+        var arrangedState = state with
+        {
+            Units = new[]
+            {
+                KingOfTheHillUnitState.CreateSeededBlock("1G", "P1", HexCoordinate.Origin, 4),
+                KingOfTheHillUnitState.CreateSeededBlock("1C", "P1", new HexCoordinate(-1, 0), 4),
+                KingOfTheHillUnitState.CreateSeededBlock("1I", "P1", new HexCoordinate(1, 0), 4),
+                KingOfTheHillUnitState.CreateSeededBlock("1E", "P1", new HexCoordinate(-1, -1), 4),
+                KingOfTheHillUnitState.CreateSeededBlock("1D", "P1", new HexCoordinate(0, 1), 4),
+                KingOfTheHillUnitState.CreateSeededBlock("2B", "P2", new HexCoordinate(0, -1), 4),
+                KingOfTheHillUnitState.CreateSeededBlock("2G", "P2", new HexCoordinate(1, -1), 4),
+                KingOfTheHillUnitState.CreateSeededBlock("2D", "P2", new HexCoordinate(-1, -2), 4),
+                KingOfTheHillUnitState.CreateSeededBlock("2F", "P2", new HexCoordinate(4, -2), 3),
+                KingOfTheHillUnitState.CreateSingle("2R", "P2", new HexCoordinate(5, -3)),
+                KingOfTheHillUnitState.CreateSingle("2W", "P2", new HexCoordinate(4, 0))
+            },
+            CurrentPlayerId = "P1",
+            TurnNumber = 18,
+            ControlScores = new Dictionary<string, int>
+            {
+                ["P1"] = 0,
+                ["P2"] = 0
+            },
+            IsCompleted = false,
+            WinnerPlayerId = null
+        };
+
+        var result = matchService.Execute(match with { State = arrangedState }, new GameCommand("pass"));
+        var updatedState = Assert.IsType<KingOfTheHillGameState>(result.Match.State);
+
+        Assert.True(result.Accepted);
+        Assert.True(updatedState.IsCompleted);
+        Assert.Equal("P1", updatedState.WinnerPlayerId);
     }
 
     private static GameCommand Move(string unitId, int q, int r) =>
